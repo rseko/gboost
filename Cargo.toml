@@ -1,0 +1,9 @@
+[package]
+name = "gboost"
+version = "0.1.0"
+edition = "2024"
+description = "Gradient boosting library in Rust"
+license = "MIT"
+repository = "https://github.com/rseko/gboost"
+
+[dependencies]
