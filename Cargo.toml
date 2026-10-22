@@ -7,3 +7,11 @@ license = "MIT"
 repository = "https://github.com/rseko/gboost"
 
 [dependencies]
+rayon = "1.12"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[[bench]]
+name = "benchmark"
+harness = false
