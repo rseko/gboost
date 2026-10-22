@@ -5,12 +5,11 @@
 //! - `FeatureType`: how a bin is matched (exact or at-or-below threshold).
 //! - `Feature`: one column's name, type, and bin boundaries.
 //! - `Dataset`: the feature matrix, target, predictions, and row gradients.
+//! - `RowIndexT`: integer row-index trait (convertible to and from `usize`).
 //! - `RowIndex`: one row's index plus its gradient and hessian.
 //! - `Objective`: loss and derivative provider trait.
 //! - `SquaredLoss`: regression objective (squared error).
 //! - `LogLoss`: classification objective (binary cross-entropy).
-
-use crate::common::Index;
 
 /// Feature type defines how values are matched.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,7 +62,7 @@ impl Default for Feature {
 
 /// Training data: feature matrix, target, running predictions, and row index.
 #[derive(Clone, Debug)]
-pub struct Dataset<T, I: Index> {
+pub struct Dataset<T, I: RowIndexT> {
     /// One descriptor per feature column.
     pub features: Vec<Feature>,
     /// One inner vector per feature, one value per row.
@@ -76,7 +75,7 @@ pub struct Dataset<T, I: Index> {
     pub index: Vec<RowIndex<I>>,
 }
 
-impl<T, I: Index> Dataset<T, I> {
+impl<T, I: RowIndexT> Dataset<T, I> {
     /// Number of columns in the dataset.
     pub fn columns(&self) -> usize {
         self.features.len()
@@ -88,9 +87,35 @@ impl<T, I: Index> Dataset<T, I> {
     }
 }
 
+/// Integer row-index trait (convertible to and from `usize`).
+pub trait RowIndexT: Copy + Send {
+    fn from_usize(index: usize) -> Self;
+    fn to_usize(&self) -> usize;
+}
+
+impl RowIndexT for u64 {
+    fn from_usize(index: usize) -> Self {
+        index as u64
+    }
+
+    fn to_usize(&self) -> usize {
+        *self as usize
+    }
+}
+
+impl RowIndexT for u32 {
+    fn from_usize(index: usize) -> Self {
+        index as u32
+    }
+
+    fn to_usize(&self) -> usize {
+        *self as usize
+    }
+}
+
 /// A single row of the dataset plus the per-iteration loss derivatives.
 #[derive(Clone, Copy, Debug)]
-pub struct RowIndex<T: Index> {
+pub struct RowIndex<T: RowIndexT> {
     /// Row position in the dataset.
     pub index: T,
     /// First derivative of the loss for this row.
@@ -99,11 +124,11 @@ pub struct RowIndex<T: Index> {
     pub hessian: f32,
 }
 
-impl<T: Index> RowIndex<T> {
+impl<T: RowIndexT> RowIndex<T> {
     /// Constructor; `index` should be validated by the user.
     pub fn new(index: usize, gradient: f32, hessian: f32) -> Self {
         RowIndex {
-            index: T::try_from(index).ok().unwrap(),
+            index: T::from_usize(index),
             gradient,
             hessian,
         }
@@ -123,7 +148,7 @@ pub trait Objective {
 pub struct SquaredLoss;
 
 impl Objective for SquaredLoss {
-    /// Loss: (y^ - y) ^ 2
+    /// Loss: (y^ - y) ^ 2 / 2
     fn loss(y: f32, y_pred: f32) -> f32 {
         let d = y_pred - y;
         0.5 * d * d

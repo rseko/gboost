@@ -55,9 +55,9 @@ pub struct NodeSplit {
     /// If the row's value is missing, route it to the positive branch.
     pub with_missing: bool,
     /// Child node taken when the split matches.
-    pub positive_id: u32,
+    pub positive_id: usize,
     /// Child node taken when the split does not match.
-    pub negative_id: u32,
+    pub negative_id: usize,
     /// Improvement in the objective gained by this split.
     pub gain: f32,
 }
@@ -72,6 +72,7 @@ impl Tree {
     where
         F: Fn(usize) -> usize,
     {
+        debug_assert!(!self.nodes.is_empty());
         let mut node = &self.nodes[0];
         while let NodeType::Split(split) = &node.type_ {
             let bin = get_bin(split.feature_id);
@@ -80,7 +81,7 @@ impl Tree {
             } else {
                 split.negative_id
             };
-            node = &self.nodes[next_id as usize];
+            node = &self.nodes[next_id];
         }
         node
     }
@@ -91,10 +92,10 @@ impl Tree {
     /// boundary value when `features` is provided), children, gain and cover;
     /// leaves show their value and cover.
     pub fn to_string(&self, features: Option<&[Feature]>) -> String {
-        let mut stack = vec![0_u32];
+        let mut stack = vec![0_usize];
         let mut result = Vec::<String>::new();
         while let Some(idx) = stack.pop() {
-            let node = &self.nodes[idx as usize];
+            let node = &self.nodes[idx];
             let indent = "    ".repeat(node.depth as usize);
             result.push(match &node.type_ {
                 NodeType::Split(split) => {
@@ -157,7 +158,15 @@ impl NodeSplit {
             let pred = if self.is_range { "<=" } else { "==" };
             let null = if self.with_missing { " | null" } else { "" };
             match feature {
-                Some(info) => format!("{} {pred} {}{null}", info.name, info.bins[self.bin_id - 1]),
+                Some(info) => format!(
+                    "{} {pred} {}{null}",
+                    info.name,
+                    if self.bin_id <= info.bins.len() {
+                        info.bins[self.bin_id - 1]
+                    } else {
+                        f32::NAN
+                    }
+                ),
                 None => format!("{} {pred} {}{null}", self.feature_id, self.bin_id),
             }
         } else {
