@@ -19,11 +19,13 @@ use rayon::prelude::*;
 /// `parallel` runs both updates over `TASK_SIZE`-row chunks via rayon; rows
 /// within and across chunks are still processed independently, so results
 /// are identical to the sequential path.
-pub fn update_small<O: Objective, T: Into<usize> + Copy + Sync, I: RowIndexT>(
+pub fn update_small<O: Objective, T: Copy + Into<usize> + Sync, I: RowIndexT>(
     data: &mut Dataset<T, I>,
     tree: Option<&Tree>,
     parallel: bool,
 ) {
+    assert!(data.is_valid());
+
     if parallel {
         // Rows are partitioned into `TASK_SIZE` chunks processed concurrently;
         // each chunk gets its base offset so global row positions stay correct.
@@ -52,7 +54,7 @@ pub fn update_small<O: Objective, T: Into<usize> + Copy + Sync, I: RowIndexT>(
 
 /// Add this row's new tree leaf value to its running prediction, for each
 /// row in `predict` chunk-by-chunk against `tree`.
-fn update_predict_slice<T: Into<usize> + Copy>(
+fn update_predict_slice<T: Copy + Into<usize>>(
     predict: &mut [f32],
     tree: &Tree,
     inputs: &[Vec<T>],
@@ -89,14 +91,14 @@ fn update_index_slice<I: RowIndexT, O: Objective>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dataset::{LogLoss, SquaredLoss};
+    use crate::dataset::{Feature, LogLoss, SquaredLoss};
     use crate::tree::{Node, NodeType};
 
     /// A small dataset with a single feature column.
     fn build_data() -> Dataset<u8, u32> {
         const NUM_ROWS: usize = 2048;
         Dataset {
-            features: vec![],
+            features: vec![Feature::default()],
             inputs: vec![vec![0; NUM_ROWS]],
             target: vec![1.0; NUM_ROWS],
             predict: vec![0.4; NUM_ROWS],
