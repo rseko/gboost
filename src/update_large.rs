@@ -1,15 +1,18 @@
-//! Incremental (staged) boost update for large, on-disk datasets.
+//! One boosting iteration's data update for large, on-disk datasets: accumulate
+//! the new tree's leaf values into the running predictions, then recompute the
+//! per-row gradient/hessian pairs. The updated predictions are written back to
+//! the `boost.<step>` file on disk.
 //!
-//! Rather than holding the full dataset in memory, this module streams row
-//! batches from per-column files and re-scores them against the previous
-//! model's predictions to compute fresh loss derivatives. Each boosting step
-//! is persisted to `boost.<step>` so later steps can be read back as the base
-//! prediction.
+//! Functions:
+//! - `update_large`: optional tree update plus gradient/hessian update,
+//!   streaming `BATCH`-row windows from disk, optionally parallelized over
+//!   batches.
 
 use crate::dataset::{Dataset, Feature, Objective, RowIndex, RowIndexT};
 use crate::tree::Tree;
 use anyhow::Result;
-use rand::{RngExt, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -52,12 +55,13 @@ pub fn update_large<O, T, I>(
     data: &mut Dataset<T, I>,
     tree: Option<&Tree>,
     path: &Path,
-    config: UpdateConfig,
+    config: &UpdateConfig,
     rng: &mut StdRng,
+    parallel: bool,
 ) -> Result<()>
 where
     O: Objective,
-    T: Copy + Default + Into<usize> + IntoBytes + FromBytes,
+    T: Copy + Into<usize> + IntoBytes + FromBytes + Send + Sync,
     I: RowIndexT,
 {
     // The sampled rows per batch must scale with the dataset size, so the
@@ -76,6 +80,32 @@ where
     );
     assert!(rest <= tail);
 
+    let (rows, cols) = (data.rows(), data.columns());
+    let batch_count = rows.div_ceil(config.bits_per_batch);
+    let last_batch = rows - rest;
+
+    // Reshape the in-memory data from per-column full-row vectors into per-batch
+    // views: `input_slices[b][c]` is batch `b`'s slice of feature column `c`.
+    let mut input_slices: Vec<Vec<&mut [T]>> = Vec::with_capacity(batch_count);
+    for _ in 0..batch_count {
+        input_slices.push(vec![]);
+    }
+    for items in data.inputs.iter_mut() {
+        for (src, dst) in items
+            .chunks_mut(config.bits_per_batch)
+            .zip(input_slices.iter_mut())
+        {
+            dst.push(src);
+        }
+    }
+
+    // Mirror the same per-batch split for the row-index slice, so each batch
+    // writes its derivatives into the matching `data.index` window.
+    let index_slices = data
+        .index
+        .chunks_mut(config.bits_per_batch)
+        .collect::<Vec<_>>();
+
     // Current boosting step is the one being produced: previous step + 1,
     // or 0 for the first step.
     let step = config.train_step.map_or(0, |n| n + 1);
@@ -86,66 +116,100 @@ where
         .create(true)
         .truncate(true)
         .open(path.join(FILENAME_PREDICT).with_extension(step.to_string()))?;
-    output.set_len((data.rows() * std::mem::size_of::<f32>()) as u64)?;
+    output.set_len((config.total_rows * std::mem::size_of::<f32>()) as u64)?;
 
-    // Reuse a single set of buffers for every batch to avoid repeated
-    // allocation: inputs, target, and prediction are read into it in-place.
-    let mut mask_generator = BitmaskGenerator::new(BATCH);
-    let mut files = UpdateFiles::open::<T>(path, &data.features, config.train_step, 0)?;
+    if parallel {
+        // One deterministic seed per batch, so each worker re-derives its own
+        // `StdRng` locally. With a fresh shuffle buffer per batch, each batch's
+        // sampled rows are reproducible without shared mutable state.
+        let seeds = rng
+            .random_iter::<u64>()
+            .take(batch_count)
+            .collect::<Vec<_>>();
 
-    let mut shared_buffer = vec![T::default(); BATCH * data.columns()];
-    let mut buffers = UpdateBuffers::new(&mut shared_buffer);
+        // Each batch runs concurrently with its own file handles and buffers,
+        // performing the same seek/read/process/write cycle as the sequential
+        // path. The shuffle buffer is created per batch, not shared per thread.
+        input_slices
+            .into_par_iter()
+            .zip(index_slices.into_par_iter())
+            .zip(seeds.into_par_iter())
+            .enumerate()
+            .try_for_each_init(
+                || {
+                    // Open the dataset's file handles per worker (the `error`
+                    // arm defers a failed open until the batch's turn).
+                    let (files, error) =
+                        match UpdateFiles::open(path, &data.features, config.train_step) {
+                            Ok(v) => (Some(v), None),
+                            Err(e) => (None, Some(e)),
+                        };
+                    (files, error, UpdateBuffers::<T>::new(cols))
+                },
+                |(files, error, buffers), (idx, ((mut inputs, index), seed))| {
+                    // Reconstruct this batch's RNG from its seed, then pick the
+                    // sampled rows and the byte width to read (full batch, or
+                    // the smaller tail for the last batch).
+                    let mut rng = StdRng::seed_from_u64(seed);
+                    let offset = idx * config.bits_per_batch;
 
-    // Mutable views into the in-memory feature columns. During sampling, the
-    // chosen rows' values are copied here (at their global positions), while
-    // the loss derivatives (grad/hess) go into `data.index` below.
-    let mut inputs = data
-        .inputs
-        .iter_mut()
-        .map(Vec::as_mut_slice)
-        .collect::<Vec<_>>();
+                    let (mask, read_size) = if offset < last_batch {
+                        let mut mask_gen = BitmaskGenerator::new(BATCH);
+                        (mask_gen.next(&mut rng, config.bits_per_batch), BATCH)
+                    } else {
+                        buffers.predict.truncate(tail);
+                        (BitmaskGenerator::new(tail).next(&mut rng, rest), tail)
+                    };
 
-    // Main loop: for each full batch, sample `bits_per_batch` rows, read the
-    // batch, add the tree contribution, recompute derivatives into `data.index`,
-    // and write the updated predictions.
-    let batch_count = config.total_rows / BATCH;
-    for batch_no in 0..batch_count {
-        let mask = mask_generator.next(rng, config.bits_per_batch);
-        files.read(&mut buffers, BATCH, config.initial)?;
-        process_batch::<O, _, _>(
-            &mut buffers,
-            &mut inputs,
-            &mut data.index,
-            tree,
-            &mask,
-            batch_no * config.bits_per_batch,
-        );
-        files.output.write_all(buffers.predict.as_bytes())?;
+                    if let Some(files) = files {
+                        files.seek::<T>(idx * BATCH)?;
+                        files.read(buffers, read_size, config.initial)?;
+                        process_batch::<O, _, _>(buffers, &mut inputs, index, tree, &mask, offset);
+                        files.output.write_all(buffers.predict.as_bytes())?;
+                    } else if let Some(error) = error.take() {
+                        return Err(error);
+                    }
+                    Ok(())
+                },
+            )
+    } else {
+        // Sequential path: one shared file-handle set, one shared scratch
+        // workspace, and one shared bitmask generator, all reused across
+        // batches (allocating exactly once up front).
+        let mut files = UpdateFiles::open(path, &data.features, config.train_step)?;
+        let mut buffers = UpdateBuffers::new(cols);
+        let mut mask_gen = BitmaskGenerator::new(BATCH);
+
+        // Walk the dataset in `bits_per_batch` global-row strides, pairing each
+        // offset with the corresponding per-batch input/index slices.
+        let counter = (0..rows).step_by(config.bits_per_batch);
+        let iter = input_slices.into_iter().zip(index_slices);
+        for (offset, (mut inputs, index)) in counter.zip(iter) {
+            // Pick the sampled row mask and the byte width to read; on the
+            // final (partial) batch also shrink the prediction buffer so the
+            // tree-walk / gradient pass touches only the real rows.
+            let (mask, read_size) = if offset < last_batch {
+                (mask_gen.next(rng, config.bits_per_batch), BATCH)
+            } else {
+                buffers.predict.truncate(tail);
+                (BitmaskGenerator::new(tail).next(rng, rest), tail)
+            };
+
+            // Read this batch's features + target + previous-step prediction
+            // into `buffers`, fold in the candidate tree and recompute the
+            // sampled rows' derivatives into `input`/`index`, then write the
+            // updated predictions out at this batch's slot in `boost.<step>`.
+            files.read(&mut buffers, read_size, config.initial)?;
+            process_batch::<O, _, _>(&mut buffers, &mut inputs, index, tree, &mask, offset);
+            files.output.write_all(buffers.predict.as_bytes())?;
+        }
+        Ok(())
     }
-
-    // Final partial batch: fewer than BATCH rows, so reseed the generator at
-    // the tail size and only sample `rest` rows.
-    if tail != 0 {
-        let mask = BitmaskGenerator::new(tail).next(rng, rest);
-        files.read(&mut buffers, tail, config.initial)?;
-        buffers.predict.truncate(tail);
-        process_batch::<O, _, _>(
-            &mut buffers,
-            &mut inputs,
-            &mut data.index,
-            tree,
-            &mask,
-            batch_count * config.bits_per_batch,
-        );
-        files.output.write_all(buffers.predict.as_bytes())?;
-    }
-    Ok(())
 }
 
-/// Process a single loaded batch: add the candidate tree's contribution to
-/// every row's prediction, then (for the rows selected by `mask`) copy their
-/// feature values into `inputs`, compute the loss gradient/hessian, and record
-/// them in `row_index` at the global position `offset + idx`.
+/// Add the candidate tree's contribution to every row's prediction, then for
+/// the rows selected by `mask` compute their loss derivatives and record them
+/// in `row_index` at the global position `offset + idx`.
 fn process_batch<O: Objective, T: Copy + Into<usize>, I: RowIndexT>(
     buffers: &mut UpdateBuffers<T>,
     inputs: &mut [&mut [T]],
@@ -159,7 +223,7 @@ fn process_batch<O: Objective, T: Copy + Into<usize>, I: RowIndexT>(
     // can be traversed row by row.
     if let Some(tree) = tree {
         for (idx, y_pred) in buffers.predict.iter_mut().enumerate() {
-            let get_bin = |col: usize| buffers.input[col][idx].into();
+            let get_bin = |col: usize| buffers.input[col * BATCH + idx].into();
             *y_pred += tree.find_leaf(get_bin).get_value();
         }
     }
@@ -173,35 +237,37 @@ fn process_batch<O: Objective, T: Copy + Into<usize>, I: RowIndexT>(
             .map(move |j| i * 64 + j)
     });
     iter.enumerate().for_each(|(idx, bit)| {
-        let pos = offset + idx; // global row position
         // Copy the sampled row's feature values from the batch buffer into the
         // in-memory inputs column view.
-        for (src, dst) in buffers.input.iter().zip(inputs.iter_mut()) {
-            dst[pos] = src[bit];
+        for (src, dst) in buffers.input.chunks(BATCH).zip(inputs.iter_mut()) {
+            dst[idx] = src[bit];
         }
         // Recompute the loss derivatives for this row using its true target and
         // the (possibly tree-adjusted) prediction, then store them.
         let (gradient, hessian) = O::grad_hess(buffers.target[bit], buffers.predict[bit]);
-        row_index[pos] = RowIndex::new(pos, gradient, hessian);
+        row_index[idx] = RowIndex::new(offset + idx, gradient, hessian);
     });
 }
 
-/// Scratch workspace holding one batch of data. `input` is a set of column
-/// slices (one per feature) partitioned from a single shared buffer; `target`
-/// and `predict` are the row-aligned label and running-prediction columns.
-struct UpdateBuffers<'a, T> {
-    input: Vec<&'a mut [T]>,
+/// Per-batch scratch workspace for one `BATCH`-row window of data. Reused
+/// across batches so each worker/thread allocates exactly once.
+struct UpdateBuffers<T> {
+    /// All feature columns, column-major: `input[col * BATCH + row]`.
+    input: Vec<T>,
+    /// True target values for the current batch (`target[row]`).
     target: Vec<f32>,
+    /// Running predictions for the current batch (`predict[row]`), seeded
+    /// from the previous step or `initial`, then extended by the candidate
+    /// tree before gradient computation.
     predict: Vec<f32>,
 }
 
-impl<'a, T> UpdateBuffers<'a, T> {
-    /// Build a workspace from a shared `BATCH * columns` buffer. The buffer is
-    /// split into `columns` slices of `BATCH` rows (the input), and fresh
-    /// `BATCH`-sized target/prediction columns are allocated.
-    fn new(buffer: &'a mut [T]) -> Self {
+impl<T: Clone + FromBytes> UpdateBuffers<T> {
+    /// Allocate column-major buffers for `columns` feature columns, sized for
+    /// one `BATCH`-row window (the tail batch reuses the same capacity).
+    fn new(columns: usize) -> Self {
         Self {
-            input: buffer.chunks_mut(BATCH).collect(),
+            input: vec![T::new_zeroed(); BATCH * columns],
             target: vec![0.0; BATCH],
             predict: vec![0.0; BATCH],
         }
@@ -212,21 +278,24 @@ impl<'a, T> UpdateBuffers<'a, T> {
 /// offset. `predict` is the previous step's prediction (if any) and `output`
 /// is the current step's prediction file being written.
 struct UpdateFiles {
+    /// One handle per feature column, column-major, in `features` order.
     input: Vec<File>,
+    /// Target values file.
     target: File,
+    /// Previous step's predictions; `None` on the first step.
     predict: Option<File>,
+    /// Current step's predictions file, being written.
     output: File,
 }
 
 impl UpdateFiles {
-    fn open<T: Sized>(
-        path: &Path,
-        features: &[Feature],
-        train_step: Option<usize>,
-        offset: usize,
-    ) -> Result<Self> {
-        // Open one feature file per column, sanitizing the name.
-        let mut input = features
+    /// Open all on-disk handles for a dataset under `path`. Each feature is
+    /// read from `feature.<name>` (special chars in the name are replaced with `_`),
+    /// the target from `target`, the previous step's predictions from
+    /// `boost.<train_step>` when present, and the current step's output file
+    /// `boost.<train_step + 1>` (step 0 on the first pass).
+    fn open(path: &Path, features: &[Feature], train_step: Option<usize>) -> Result<Self> {
+        let input = features
             .iter()
             .map(|feature| {
                 let name = feature.name.replace(['.', '/', '\\'], "_");
@@ -236,39 +305,22 @@ impl UpdateFiles {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Seek each feature file to the row `offset` (bytes = offset * size_of::<T>).
-        let position = (offset * std::mem::size_of::<T>()) as u64;
-        for file in input.iter_mut() {
-            file.seek(SeekFrom::Start(position))?;
-        }
-
-        // Target is f32, so the seek offset uses size_of::<f32> rather than T.
-        let mut target = OpenOptions::new()
+        let target = OpenOptions::new()
             .read(true)
             .open(path.join(FILENAME_TARGET))?;
-        let position = (offset * std::mem::size_of::<f32>()) as u64;
-        target.seek(SeekFrom::Start(position))?;
 
-        // Previous-step prediction only exists if `train_step` is set;
-        // otherwise `predict` stays `None` and `read` seeds via `initial`.
-        let mut predict = train_step
+        let predict = train_step
             .map(|step| {
                 OpenOptions::new()
                     .read(true)
                     .open(path.join(FILENAME_PREDICT).with_extension(step.to_string()))
             })
             .transpose()?;
-        if let Some(file) = &mut predict {
-            file.seek(SeekFrom::Start(position))?;
-        }
 
-        // Output is next step's prediction file (train_step + 1, or 0 on first step),
-        // truncated and written by the streaming loop.
         let step = train_step.map_or(0, |n| n + 1);
-        let mut output = OpenOptions::new()
+        let output = OpenOptions::new()
             .write(true)
             .open(path.join(FILENAME_PREDICT).with_extension(step.to_string()))?;
-        output.seek(SeekFrom::Start(position))?;
 
         Ok(Self {
             input,
@@ -276,6 +328,24 @@ impl UpdateFiles {
             predict,
             output,
         })
+    }
+
+    /// Position every handle at global row `offset`: feature files at
+    /// `offset * size_of::<T>()`, and the target/predict/output files at
+    /// `offset * size_of::<f32>()`, from the start of each file.
+    fn seek<T: Sized>(&mut self, offset: usize) -> Result<()> {
+        let position = (offset * std::mem::size_of::<T>()) as u64;
+        for file in self.input.iter_mut() {
+            file.seek(SeekFrom::Start(position))?;
+        }
+
+        let position = (offset * std::mem::size_of::<f32>()) as u64;
+        self.target.seek(SeekFrom::Start(position))?;
+        if let Some(file) = &mut self.predict {
+            file.seek(SeekFrom::Start(position))?;
+        }
+        self.output.seek(SeekFrom::Start(position))?;
+        Ok(())
     }
 
     /// Read `size` rows of feature columns, prediction, and target into the
@@ -288,7 +358,7 @@ impl UpdateFiles {
         size: usize,
         initial: f32,
     ) -> Result<()> {
-        for (file, slice) in self.input.iter_mut().zip(buffers.input.iter_mut()) {
+        for (file, slice) in self.input.iter_mut().zip(buffers.input.chunks_mut(BATCH)) {
             file.read_exact(slice[..size].as_mut_bytes())?;
         }
         // Seed predictions from the previous step, or the constant initial value
@@ -315,6 +385,8 @@ struct BitmaskGenerator {
 }
 
 impl BitmaskGenerator {
+    /// Create a bitmask generator that samples within `total` rows
+    /// (must be `<= BATCH`), initializing the persistent shuffle scratch.
     fn new(total: usize) -> Self {
         assert!(total <= BATCH);
         Self {
@@ -335,6 +407,10 @@ impl BitmaskGenerator {
     fn next(&mut self, rng: &mut StdRng, bits: usize) -> Vec<u64> {
         assert!(bits <= self.total);
         if bits <= self.total / 2 {
+            // Partial Fisher–Yates: iteratively pick a random pivot in
+            // `[i, total)`, swap it into slot `i`, and record the row id now
+            // sitting at slot `i` as the chosen bit.
+            //
             // Start from an empty mask and set the chosen bits.
             let mut mask = vec![0; self.total.div_ceil(64)];
             for i in 0..bits {
@@ -345,6 +421,9 @@ impl BitmaskGenerator {
             }
             mask
         } else {
+            // Same shuffle as above, but recording the *unchosen* rows so we
+            // only need `total - bits` draws.
+            //
             // Chosen set is a majority: start all-ones and clear the unchosen.
             let mut mask = vec![u64::MAX; self.total.div_ceil(64)];
             for i in 0..(self.total - bits) {
@@ -353,9 +432,12 @@ impl BitmaskGenerator {
                 let (m, n) = (self.index[i] >> 6, self.index[i] & 63);
                 mask[m as usize] &= !(1 << n);
             }
+            // `u64::MAX` seed set every bit including the spurious ones past
+            // `total`; mask the last word down to just the valid `last_bits`
+            // so rows beyond the batch aren't accidentally marked.
             if !self.total.is_multiple_of(64) {
                 let last_bits = self.total % 64;
-                *mask.last_mut().unwrap() = (1 << last_bits) - 1;
+                *mask.last_mut().unwrap() &= (1 << last_bits) - 1;
             }
             mask
         }

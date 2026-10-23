@@ -22,8 +22,6 @@ pub struct Tree {
 /// A tree node: either an internal split or a leaf value.
 #[derive(Clone, Debug)]
 pub struct Node {
-    /// Stable node identifier (matches its index in `Tree::nodes`).
-    pub id: u32,
     /// Whether the node is a split or a leaf, and its payload.
     pub type_: NodeType,
     /// Distance from the root (root is depth 0).
@@ -108,7 +106,7 @@ impl Tree {
                     format!(
                         "{}{}:[{}] yes={},no={},gain={},cover={}",
                         indent,
-                        node.id,
+                        idx,
                         split.to_string(features.and_then(|x| x.get(split.feature_id))),
                         split.positive_id,
                         split.negative_id,
@@ -117,7 +115,7 @@ impl Tree {
                     )
                 }
                 NodeType::Leaf(value) => {
-                    format!("{}{}:value={},cover={}", indent, node.id, value, node.cover)
+                    format!("{}{}:value={},cover={}", indent, idx, value, node.cover)
                 }
             });
         }
@@ -132,6 +130,24 @@ impl Node {
         match &self.type_ {
             NodeType::Leaf(value) => *value,
             _ => f32::NAN,
+        }
+    }
+
+    /// Default split node (used in tests).
+    pub fn default_split(split: NodeSplit) -> Self {
+        Self {
+            type_: NodeType::Split(split),
+            depth: 0,
+            cover: 0.0,
+        }
+    }
+
+    /// Default leaf node (used in tests).
+    pub fn default_leaf(value: f32) -> Self {
+        Self {
+            type_: NodeType::Leaf(value),
+            depth: 1,
+            cover: 0.0,
         }
     }
 }
@@ -191,32 +207,17 @@ mod tests {
 
     /// A small two-level tree: one split at the root with two leaf children.
     fn build_tree(is_range: bool, with_missing: bool) -> Tree {
-        let root = Node {
-            id: 0,
-            type_: NodeType::Split(NodeSplit {
-                feature_id: 0,
-                bin_id: 2,
-                is_range,
-                with_missing,
-                positive_id: 1,
-                negative_id: 2,
-                gain: 0.0,
-            }),
-            depth: 0,
-            cover: 5.0,
-        };
-        let left = Node {
-            id: 1,
-            type_: NodeType::Leaf(0.5),
-            depth: 1,
-            cover: 2.0,
-        };
-        let right = Node {
-            id: 2,
-            type_: NodeType::Leaf(-0.5),
-            depth: 1,
-            cover: 3.0,
-        };
+        let root = Node::default_split(NodeSplit {
+            feature_id: 0,
+            bin_id: 2,
+            is_range,
+            with_missing,
+            positive_id: 1,
+            negative_id: 2,
+            gain: 9.9,
+        });
+        let left = Node::default_leaf(1.0);
+        let right = Node::default_leaf(2.0);
         Tree {
             nodes: vec![root, left, right],
         }
@@ -225,19 +226,19 @@ mod tests {
     #[test]
     fn search_onehot() {
         let tree = build_tree(/*is_range*/ false, /*with_missing*/ true);
-        assert_eq!(tree.find_leaf(|_| 0).id, 1);
-        assert_eq!(tree.find_leaf(|_| 1).id, 2);
-        assert_eq!(tree.find_leaf(|_| 2).id, 1);
-        assert_eq!(tree.find_leaf(|_| 3).id, 2);
+        assert_eq!(tree.find_leaf(|_| 0).get_value(), 1.);
+        assert_eq!(tree.find_leaf(|_| 1).get_value(), 2.);
+        assert_eq!(tree.find_leaf(|_| 2).get_value(), 1.);
+        assert_eq!(tree.find_leaf(|_| 3).get_value(), 2.);
     }
 
     #[test]
     fn search_linear() {
         let tree = build_tree(/*is_range*/ true, /*with_missing*/ false);
-        assert_eq!(tree.find_leaf(|_| 0).id, 2);
-        assert_eq!(tree.find_leaf(|_| 1).id, 1);
-        assert_eq!(tree.find_leaf(|_| 2).id, 1);
-        assert_eq!(tree.find_leaf(|_| 3).id, 2);
+        assert_eq!(tree.find_leaf(|_| 0).get_value(), 2.);
+        assert_eq!(tree.find_leaf(|_| 1).get_value(), 1.);
+        assert_eq!(tree.find_leaf(|_| 2).get_value(), 1.);
+        assert_eq!(tree.find_leaf(|_| 3).get_value(), 2.);
     }
 
     #[test]
@@ -245,9 +246,9 @@ mod tests {
         let tree = build_tree(/*is_range*/ true, /*with_missing*/ true);
         assert_eq!(
             tree.to_string(None),
-            "0:[0 <= 2 | null] yes=1,no=2,gain=0,cover=5\n    \
-                1:value=0.5,cover=2\n    \
-                2:value=-0.5,cover=3"
+            "0:[0 <= 2 | null] yes=1,no=2,gain=9.9,cover=0\n    \
+                1:value=1,cover=0\n    \
+                2:value=2,cover=0"
         );
     }
 }

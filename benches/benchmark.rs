@@ -1,20 +1,19 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use std::time::Duration;
 
-use gboost::dataset::{Dataset, Feature, RowIndex, SquaredLoss};
+use gboost::dataset::{Dataset, Feature, SquaredLoss};
 use gboost::update_small::update_small;
 
 const NUM_ROWS: usize = 1_000_000;
 const NUM_COLS: usize = 128;
 
 fn create_dataset() -> Dataset<u8, u32> {
-    Dataset {
-        features: vec![Feature::default(); NUM_COLS],
-        inputs: vec![vec![0; NUM_ROWS]; NUM_COLS],
-        target: vec![0.0; NUM_ROWS],
-        predict: vec![0.0; NUM_ROWS],
-        index: (0..NUM_ROWS).map(|i| RowIndex::new(i, 0.0, 0.0)).collect(),
-    }
+    Dataset::new(
+        vec![Feature::default(); NUM_COLS],
+        vec![vec![0; NUM_ROWS]; NUM_COLS],
+        vec![0.0; NUM_ROWS],
+        0.0,
+    )
 }
 
 fn bench_update(c: &mut Criterion) {
