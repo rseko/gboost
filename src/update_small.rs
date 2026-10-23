@@ -52,8 +52,7 @@ pub fn update_small<O: Objective, T: Copy + Into<usize> + Sync, I: RowIndexT>(
     }
 }
 
-/// Add this row's new tree leaf value to its running prediction, for each
-/// row in `predict` chunk-by-chunk against `tree`.
+/// Add the tree's leaf value to each row in `predict`.
 fn update_predict_slice<T: Copy + Into<usize>>(
     predict: &mut [f32],
     tree: &Tree,
@@ -92,28 +91,22 @@ fn update_index_slice<I: RowIndexT, O: Objective>(
 mod tests {
     use super::*;
     use crate::dataset::{Feature, LogLoss, SquaredLoss};
-    use crate::tree::{Node, NodeType};
+    use crate::tree::Node;
 
     /// A small dataset with a single feature column.
     fn build_data() -> Dataset<u8, u32> {
         const NUM_ROWS: usize = 2048;
-        Dataset {
-            features: vec![Feature::default()],
-            inputs: vec![vec![0; NUM_ROWS]],
-            target: vec![1.0; NUM_ROWS],
-            predict: vec![0.4; NUM_ROWS],
-            index: vec![RowIndex::new(0, 0.0, 0.0); NUM_ROWS],
-        }
+        Dataset::new(
+            vec![Feature::default()],
+            vec![vec![0; NUM_ROWS]],
+            vec![1.0; NUM_ROWS],
+            0.4,
+        )
     }
 
     /// A degenerate tree that predicts a constant 0.1 per row.
     fn build_tree() -> Tree {
-        let root = Node {
-            id: 0,
-            type_: NodeType::Leaf(0.1),
-            depth: 0,
-            cover: 1.0,
-        };
+        let root = Node::default_leaf(0.1);
         Tree { nodes: vec![root] }
     }
 

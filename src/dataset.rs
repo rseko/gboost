@@ -76,21 +76,42 @@ pub struct Dataset<T, I: RowIndexT> {
 }
 
 impl<T, I: RowIndexT> Dataset<T, I> {
+    /// Build a new dataset from its parts. `predict` is seeded to `initial`
+    /// for every target, and `index` is initialized to zero derivative.
+    pub fn new(
+        features: Vec<Feature>,
+        inputs: Vec<Vec<T>>,
+        target: Vec<f32>,
+        initial: f32,
+    ) -> Self {
+        let rows = inputs.first().map(|x| x.len()).unwrap_or(0);
+        let index = (0..rows).map(|i| RowIndex::new(i, 0.0, 0.0)).collect();
+        let predict = vec![initial; target.len()];
+        Self {
+            features,
+            inputs,
+            target,
+            predict,
+            index,
+        }
+    }
+
     /// Number of columns in the dataset.
     pub fn columns(&self) -> usize {
-        self.features.len()
+        self.inputs.len()
     }
 
     /// Number of rows in the dataset.
     pub fn rows(&self) -> usize {
-        self.target.len()
+        self.inputs.first().map(|x| x.len()).unwrap_or(0)
     }
 
     /// Check that the structure sizes agree.
     pub fn is_valid(&self) -> bool {
-        self.inputs.len() == self.columns()
+        self.features.len() == self.columns()
             && self.inputs.iter().all(|col| col.len() == self.rows())
-            && self.predict.len() == self.rows()
+            && (self.target.is_empty() || self.target.len() == self.rows())
+            && self.predict.len() == self.target.len()
             && self.index.len() == self.rows()
     }
 }
@@ -193,6 +214,46 @@ fn odds(y: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn valid_small() {
+        // Small dataset (`u8` bins, `u32` index).
+        let features = vec![Feature::default(); 2];
+        let input = vec![vec![0, 1, 2]; 2];
+        let data = Dataset::<u8, u32>::new(features, input, vec![1.0; 3], 0.5);
+
+        assert!(data.is_valid());
+        assert_eq!(data.rows(), 3);
+        assert_eq!(data.columns(), 2);
+        assert_eq!(data.predict, vec![0.5; 3]);
+    }
+
+    #[test]
+    fn valid_large() {
+        // Large dataset (`u16` bins, `u64` index, target/predict offloaded).
+        let features = vec![Feature::default(); 2];
+        let input = vec![vec![0; 1000]; 2];
+        let data = Dataset::<u16, u64>::new(features.clone(), input, vec![], 0.0);
+
+        assert!(data.is_valid());
+        assert_eq!(data.rows(), 1000);
+        assert_eq!(data.columns(), 2);
+        assert!(data.predict.is_empty());
+    }
+
+    #[test]
+    fn invalid_data() {
+        let features = vec![Feature::default(); 2];
+        let input = vec![vec![0; 3]; 2];
+        let create = |f, x, y| Dataset::<u8, u32>::new(f, x, y, 0.0);
+
+        let missing_features = create(vec![], input.clone(), vec![]);
+        assert!(!missing_features.is_valid());
+        let invalid_input = create(features.clone(), vec![vec![0; 3]], vec![]);
+        assert!(!invalid_input.is_valid());
+        let invalid_target = create(features.clone(), input.clone(), vec![1.0]);
+        assert!(!invalid_target.is_valid());
+    }
 
     #[test]
     fn squared_loss() {
