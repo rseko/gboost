@@ -85,6 +85,14 @@ impl<T, I: RowIndexT> Dataset<T, I> {
     pub fn rows(&self) -> usize {
         self.target.len()
     }
+
+    /// Check that the structure sizes agree.
+    pub fn is_valid(&self) -> bool {
+        self.inputs.len() == self.columns()
+            && self.inputs.iter().all(|col| col.len() == self.rows())
+            && self.predict.len() == self.rows()
+            && self.index.len() == self.rows()
+    }
 }
 
 /// Integer row-index trait (convertible to and from `usize`).

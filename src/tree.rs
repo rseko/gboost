@@ -72,7 +72,7 @@ impl Tree {
     where
         F: Fn(usize) -> usize,
     {
-        debug_assert!(!self.nodes.is_empty());
+        assert!(!self.nodes.is_empty());
         let mut node = &self.nodes[0];
         while let NodeType::Split(split) = &node.type_ {
             let bin = get_bin(split.feature_id);
@@ -92,7 +92,10 @@ impl Tree {
     /// boundary value when `features` is provided), children, gain and cover;
     /// leaves show their value and cover.
     pub fn to_string(&self, features: Option<&[Feature]>) -> String {
-        let mut stack = vec![0_usize];
+        let mut stack = Vec::new();
+        if !self.nodes.is_empty() {
+            stack.push(0);
+        }
         let mut result = Vec::<String>::new();
         while let Some(idx) = stack.pop() {
             let node = &self.nodes[idx];
@@ -106,7 +109,7 @@ impl Tree {
                         "{}{}:[{}] yes={},no={},gain={},cover={}",
                         indent,
                         node.id,
-                        split.to_string(features.map(|x| &x[split.feature_id])),
+                        split.to_string(features.and_then(|x| x.get(split.feature_id))),
                         split.positive_id,
                         split.negative_id,
                         split.gain,
