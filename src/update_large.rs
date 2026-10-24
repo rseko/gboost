@@ -21,20 +21,20 @@ use zerocopy::{FromBytes, IntoBytes};
 /// Base file names used for on-disk I/O. Full filenames are derived by
 /// appending per-feature or per-step extensions (e.g. `feature.<name>`,
 /// `target`, `boost.1`).
-const FILENAME_INPUT: &str = "feature";
-const FILENAME_TARGET: &str = "target";
-const FILENAME_PREDICT: &str = "boost";
+pub const FILENAME_INPUT: &str = "feature";
+pub const FILENAME_TARGET: &str = "target";
+pub const FILENAME_PREDICT: &str = "boost";
 
 /// Maximum number of rows processed in a single batch. The data is partitioned
 /// into at most `BATCH` rows of each column, and `bits_per_batch` samples are
 /// drawn from that batch for gradient computation.
-const BATCH: usize = 65536;
+pub const BATCH: usize = 65536;
 
 /// Parameters controlling the incremental update pass.
 #[derive(Clone, Debug)]
 pub struct UpdateConfig {
     /// Previous boosting step, if any; its on-disk artifact is the base prediction.
-    pub train_step: Option<usize>,
+    pub train_step: usize,
     /// Total number of rows in the dataset.
     pub total_rows: usize,
     /// Fallback prediction used when no previous step exists.
@@ -106,16 +106,14 @@ where
     // writes its derivatives into the matching `index` window.
     let index_slices = index.chunks_mut(config.bits_per_batch).collect::<Vec<_>>();
 
-    // Current boosting step is the one being produced: previous step + 1,
-    // or 0 for the first step.
-    let step = config.train_step.map_or(0, |n| n + 1);
     // Create and size the prediction file for this step up front so the
     // output is a fixed-length, fully written artifact for all rows.
+    let suffix = (config.train_step + 1).to_string();
     let output = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(path.join(FILENAME_PREDICT).with_extension(step.to_string()))?;
+        .open(path.join(FILENAME_PREDICT).with_extension(suffix))?;
     output.set_len((config.total_rows * std::mem::size_of::<f32>()) as u64)?;
 
     if parallel {
@@ -294,7 +292,7 @@ impl UpdateFiles {
     /// the target from `target`, the previous step's predictions from
     /// `boost.<train_step>` when present, and the current step's output file
     /// `boost.<train_step + 1>` (step 0 on the first pass).
-    fn open(path: &Path, features: &[Feature], train_step: Option<usize>) -> Result<Self> {
+    fn open(path: &Path, features: &[Feature], train_step: usize) -> Result<Self> {
         let input = features
             .iter()
             .map(|feature| {
@@ -309,18 +307,21 @@ impl UpdateFiles {
             .read(true)
             .open(path.join(FILENAME_TARGET))?;
 
-        let predict = train_step
-            .map(|step| {
+        let predict = if train_step > 0 {
+            let suffix = train_step.to_string();
+            Some(
                 OpenOptions::new()
                     .read(true)
-                    .open(path.join(FILENAME_PREDICT).with_extension(step.to_string()))
-            })
-            .transpose()?;
+                    .open(path.join(FILENAME_PREDICT).with_extension(suffix))?,
+            )
+        } else {
+            None
+        };
 
-        let step = train_step.map_or(0, |n| n + 1);
+        let suffix = (train_step + 1).to_string();
         let output = OpenOptions::new()
             .write(true)
-            .open(path.join(FILENAME_PREDICT).with_extension(step.to_string()))?;
+            .open(path.join(FILENAME_PREDICT).with_extension(suffix))?;
 
         Ok(Self {
             input,
@@ -440,6 +441,185 @@ impl BitmaskGenerator {
                 *mask.last_mut().unwrap() &= (1 << last_bits) - 1;
             }
             mask
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset::{Feature, SquaredLoss};
+    use crate::tree::{Node, NodeSplit};
+    use rand::Rng;
+
+    const NUM_ROWS: usize = 100_000;
+    const NUM_SAMPLES: usize = 30_000;
+    const TEST_SEED: u64 = 42;
+
+    /// A random dataset with a two feature columns.
+    fn build_data() -> Dataset<u8> {
+        let mut rng = StdRng::seed_from_u64(TEST_SEED);
+        let mut random_row = || {
+            let mut data = vec![0; NUM_ROWS];
+            rng.fill_bytes(data.as_mut_slice());
+            data
+        };
+
+        Dataset::new(
+            vec![
+                Feature::linear("1".into(), vec![]),
+                Feature::linear("2".into(), vec![]),
+            ],
+            vec![random_row(), random_row()],
+            vec![1.0; NUM_ROWS],
+            0.5,
+        )
+    }
+
+    /// A simple tree that predicts a ±0.125 per row.
+    fn build_tree() -> Tree {
+        let root = Node::default_split(NodeSplit {
+            feature_id: 0,
+            bin_id: 127,
+            is_range: true,
+            with_missing: true,
+            positive_id: 1,
+            negative_id: 2,
+            gain: 0.0,
+        });
+        let left = Node::default_leaf(-0.125);
+        let right = Node::default_leaf(0.125);
+        Tree {
+            nodes: vec![root, left, right],
+        }
+    }
+
+    /// Write dataset to temp files.
+    fn write_dataset(path: &Path, data: &Dataset<u8>) {
+        for (feature, row) in data.features.iter().zip(&data.inputs) {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path.join(FILENAME_INPUT).with_extension(&feature.name))
+                .unwrap();
+            file.write_all(row.as_bytes()).unwrap();
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path.join(FILENAME_TARGET))
+            .unwrap();
+        file.write_all(data.target.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn large_test() {
+        // Create the dataset and write it to disk.
+        let (mut data, tree) = (build_data(), build_tree());
+        let mut rng = StdRng::seed_from_u64(TEST_SEED);
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        write_dataset(temp_dir.path(), &data);
+
+        // Truncate the dataset.
+        let sampled_rows = NUM_ROWS * NUM_SAMPLES / BATCH;
+        let mut index = RowIndex::<u32, SquaredLoss>::new_array(sampled_rows);
+        for row in data.inputs.iter_mut() {
+            row.truncate(sampled_rows);
+        }
+        data.target.clear();
+        data.predict.clear();
+
+        // Run the first update.
+        let mut config = UpdateConfig {
+            train_step: 0,
+            total_rows: NUM_ROWS,
+            initial: 0.5,
+            bits_per_batch: NUM_SAMPLES,
+        };
+        assert!(
+            update_large(
+                &mut data,
+                &mut index,
+                Some(&tree),
+                temp_dir.path(),
+                &config,
+                &mut rng,
+                /*parallel*/ false
+            )
+            .is_ok()
+        );
+
+        // Verify the resulting dataset.
+        let sum_inputs = |a: &[u8]| a.iter().map(|x| *x as u64).sum::<u64>();
+        assert_eq!(sum_inputs(&data.inputs[0]), 5797195);
+        assert_eq!(sum_inputs(&data.inputs[1]), 5806821);
+        assert_eq!(
+            index.iter().map(|x| x.deriv.grad_hess().0).sum::<f32>(),
+            -22928.5
+        );
+
+        // Run the second update.
+        config.train_step += 1;
+        assert!(
+            update_large(
+                &mut data,
+                &mut index,
+                Some(&tree),
+                temp_dir.path(),
+                &config,
+                &mut rng,
+                /*parallel*/ true
+            )
+            .is_ok()
+        );
+
+        // Verify the resulting dataset.
+        assert_eq!(sum_inputs(&data.inputs[0]), 5814872);
+        assert_eq!(sum_inputs(&data.inputs[1]), 5838459);
+        assert_eq!(
+            index.iter().map(|x| x.deriv.grad_hess().0).sum::<f32>(),
+            -22939.0
+        );
+
+        // Verify the resulting file.
+        let mut predict = vec![0.0_f32; NUM_ROWS];
+        let mut file = OpenOptions::new()
+            .read(true)
+            .open(temp_dir.path().join(FILENAME_PREDICT).with_extension("2"))
+            .unwrap();
+        file.read_exact(predict.as_mut_bytes()).unwrap();
+
+        assert_eq!(predict[NUM_ROWS - 3..], [0.25, 0.75, 0.25]);
+        assert_eq!(predict.iter().sum::<f32>(), 49970.5);
+    }
+
+    /// Popcount of the mask, summed across its `u64` words.
+    fn mask_popcount(mask: &[u64]) -> u64 {
+        mask.iter().map(|w| w.count_ones() as u64).sum()
+    }
+
+    #[test]
+    fn bit_generator() {
+        // (total, bits) pairs spanning both branches and the branch boundary.
+        // Branch A is `bits <= total / 2`; branch B is `bits > total / 2`.
+        let cases: &[(usize, usize)] = &[
+            (2, 0),             // branch A, none selected
+            (2, 1),             // branch A, minimal
+            (2, 2),             // branch B, all selected
+            (10, 5),            // branch A, exactly total / 2
+            (10, 6),            // branch B, just over total / 2
+            (BATCH, BATCH / 2), // branch A, full BATCH
+            (BATCH, BATCH - 1), // branch B, near BATCH, non-multiple of 64
+            (BATCH, BATCH),     // branch B, full BATCH, all selected
+        ];
+
+        for &(total, bits) in cases {
+            let mut rng = StdRng::seed_from_u64(TEST_SEED);
+            let mut mask_gen = BitmaskGenerator::new(total);
+            let mask = mask_gen.next(&mut rng, bits);
+            assert_eq!(mask_popcount(&mask), bits as u64);
         }
     }
 }

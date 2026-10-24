@@ -93,7 +93,7 @@ mod tests {
 
     /// A small dataset with a single feature column.
     fn build_data() -> Dataset<u8> {
-        const NUM_ROWS: usize = 2048;
+        const NUM_ROWS: usize = 5000;
         Dataset::new(
             vec![Feature::default()],
             vec![vec![0; NUM_ROWS]],
@@ -113,10 +113,12 @@ mod tests {
         let (mut data, tree) = (build_data(), build_tree());
         let mut index = RowIndex::<u32, SquaredLoss>::new_array(data.rows());
         update_small(&mut data, &mut index, Some(&tree), /*parallel*/ false);
+
         assert!(data.predict.iter().all(|x| *x == 0.5));
-        index
-            .iter()
-            .for_each(|x| assert_eq!(x.deriv.grad_hess(), (-0.5, 1.0)));
+        index.iter().enumerate().for_each(|(k, v)| {
+            assert_eq!(v.index.to_usize(), k);
+            assert_eq!(v.deriv.grad_hess(), (-0.5, 1.0));
+        });
     }
 
     #[test]
@@ -124,9 +126,11 @@ mod tests {
         let (mut data, tree) = (build_data(), build_tree());
         let mut index = RowIndex::<u32, LogLoss>::new_array(data.rows());
         update_small(&mut data, &mut index, Some(&tree), /*parallel*/ true);
+
         assert!(data.predict.iter().all(|x| *x == 0.5));
-        index
-            .iter()
-            .for_each(|x| assert_eq!(x.deriv.grad_hess(), (-0.37754065, 0.23500371)));
+        index.iter().enumerate().for_each(|(k, v)| {
+            assert_eq!(v.index.to_usize(), k);
+            assert_eq!(v.deriv.grad_hess(), (-0.37754065, 0.23500371));
+        });
     }
 }
