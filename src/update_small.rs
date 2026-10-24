@@ -5,7 +5,7 @@
 //! - `update_small`: optional tree update plus gradient/hessian update, optionally
 //!   parallelized over row chunks.
 
-use crate::dataset::{Dataset, Objective, RowIndex, RowIndexT};
+use crate::dataset::{Dataset, IndexT, Objective, RowIndex};
 use crate::tree::Tree;
 use rayon::prelude::*;
 
@@ -19,12 +19,14 @@ use rayon::prelude::*;
 /// `parallel` runs both updates over `TASK_SIZE`-row chunks via rayon; rows
 /// within and across chunks are still processed independently, so results
 /// are identical to the sequential path.
-pub fn update_small<O: Objective, T: Copy + Into<usize> + Sync, I: RowIndexT>(
-    data: &mut Dataset<T, I>,
+pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
+    data: &mut Dataset<T>,
+    index: &mut [RowIndex<I, O>],
     tree: Option<&Tree>,
     parallel: bool,
 ) {
     assert!(data.is_valid());
+    assert_eq!(index.len(), data.rows());
 
     if parallel {
         // Rows are partitioned into `TASK_SIZE` chunks processed concurrently;
@@ -32,7 +34,7 @@ pub fn update_small<O: Objective, T: Copy + Into<usize> + Sync, I: RowIndexT>(
         const TASK_SIZE: usize = 1024;
         let target_chunks = data.target.par_chunks(TASK_SIZE);
         let predict_chunks = data.predict.par_chunks_mut(TASK_SIZE);
-        let index_chunks = data.index.par_chunks_mut(TASK_SIZE);
+        let index_chunks = index.par_chunks_mut(TASK_SIZE);
 
         index_chunks
             .zip(target_chunks.zip(predict_chunks))
@@ -48,7 +50,7 @@ pub fn update_small<O: Objective, T: Copy + Into<usize> + Sync, I: RowIndexT>(
         if let Some(tree) = tree {
             update_predict_slice(&mut data.predict, tree, &data.inputs, 0);
         }
-        update_index_slice::<I, O>(&mut data.index, &data.target, &data.predict, 0);
+        update_index_slice::<I, O>(index, &data.target, &data.predict, 0);
     }
 }
 
@@ -71,20 +73,16 @@ fn update_predict_slice<T: Copy + Into<usize>>(
 ///
 /// `offset` is the dataset-wide index of the first row in this slice, so
 /// parallel chunks keep correct global row ids.
-fn update_index_slice<I: RowIndexT, O: Objective>(
-    row_index: &mut [RowIndex<I>],
+fn update_index_slice<I: IndexT, O: Objective>(
+    index: &mut [RowIndex<I, O>],
     target: &[f32],
     predict: &[f32],
     offset: usize,
 ) {
-    row_index
-        .iter_mut()
-        .zip(target.iter().zip(predict))
-        .enumerate()
-        .for_each(|(idx, (dst, (y, y_pred)))| {
-            let (gradient, hessian) = O::grad_hess(*y, *y_pred);
-            *dst = RowIndex::new(offset + idx, gradient, hessian);
-        });
+    for idx in 0..index.len() {
+        let deriv = O::derive(target[idx], predict[idx]);
+        index[idx] = RowIndex::new(offset + idx, deriv);
+    }
 }
 
 #[cfg(test)]
@@ -94,7 +92,7 @@ mod tests {
     use crate::tree::Node;
 
     /// A small dataset with a single feature column.
-    fn build_data() -> Dataset<u8, u32> {
+    fn build_data() -> Dataset<u8> {
         const NUM_ROWS: usize = 2048;
         Dataset::new(
             vec![Feature::default()],
@@ -113,16 +111,22 @@ mod tests {
     #[test]
     fn update_simple() {
         let (mut data, tree) = (build_data(), build_tree());
-        update_small::<SquaredLoss, _, _>(&mut data, Some(&tree), false);
+        let mut index = RowIndex::<u32, SquaredLoss>::new_array(data.rows());
+        update_small(&mut data, &mut index, Some(&tree), /*parallel*/ false);
         assert!(data.predict.iter().all(|x| *x == 0.5));
-        assert!(data.index.iter().all(|x| x.gradient == -0.5));
+        index
+            .iter()
+            .for_each(|x| assert_eq!(x.deriv.grad_hess(), (-0.5, 1.0)));
     }
 
     #[test]
     fn update_parallel() {
         let (mut data, tree) = (build_data(), build_tree());
-        update_small::<LogLoss, _, _>(&mut data, Some(&tree), true);
+        let mut index = RowIndex::<u32, LogLoss>::new_array(data.rows());
+        update_small(&mut data, &mut index, Some(&tree), /*parallel*/ true);
         assert!(data.predict.iter().all(|x| *x == 0.5));
-        assert!(data.index.iter().all(|x| x.hessian == 0.23500371));
+        index
+            .iter()
+            .for_each(|x| assert_eq!(x.deriv.grad_hess(), (-0.37754065, 0.23500371)));
     }
 }

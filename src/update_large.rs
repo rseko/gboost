@@ -8,7 +8,7 @@
 //!   streaming `BATCH`-row windows from disk, optionally parallelized over
 //!   batches.
 
-use crate::dataset::{Dataset, Feature, Objective, RowIndex, RowIndexT};
+use crate::dataset::{Dataset, Feature, IndexT, Objective, RowIndex};
 use crate::tree::Tree;
 use anyhow::Result;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
@@ -49,10 +49,11 @@ pub struct UpdateConfig {
 /// target columns (and the previous step's predictions, when present), adds the
 /// candidate `tree`'s contribution to the prediction, then uses a bitmask to
 /// sample `bits_per_batch` rows to recompute the loss gradient and hessian.
-/// Those derivatives are written into `data.index` and the updated predictions
+/// Those derivatives are written into `index` and the updated predictions
 /// into `boost.<step>`. A final partial batch (the tail) is handled separately.
-pub fn update_large<O, T, I>(
-    data: &mut Dataset<T, I>,
+pub fn update_large<T, I, O>(
+    data: &mut Dataset<T>,
+    index: &mut [RowIndex<I, O>],
     tree: Option<&Tree>,
     path: &Path,
     config: &UpdateConfig,
@@ -60,13 +61,15 @@ pub fn update_large<O, T, I>(
     parallel: bool,
 ) -> Result<()>
 where
-    O: Objective,
     T: Copy + Into<usize> + IntoBytes + FromBytes + Send + Sync,
-    I: RowIndexT,
+    I: IndexT,
+    O: Objective,
 {
+    assert!(data.is_valid());
+    assert_eq!(index.len(), data.rows());
+
     // The sampled rows per batch must scale with the dataset size, so the
     // in-memory `data(inputs)` view and the on-disk layout stay consistent.
-    assert!(data.is_valid());
     assert!(config.bits_per_batch > 0 && config.bits_per_batch <= BATCH);
     assert_eq!(
         config.total_rows / BATCH,
@@ -100,11 +103,8 @@ where
     }
 
     // Mirror the same per-batch split for the row-index slice, so each batch
-    // writes its derivatives into the matching `data.index` window.
-    let index_slices = data
-        .index
-        .chunks_mut(config.bits_per_batch)
-        .collect::<Vec<_>>();
+    // writes its derivatives into the matching `index` window.
+    let index_slices = index.chunks_mut(config.bits_per_batch).collect::<Vec<_>>();
 
     // Current boosting step is the one being produced: previous step + 1,
     // or 0 for the first step.
@@ -164,7 +164,7 @@ where
                     if let Some(files) = files {
                         files.seek::<T>(idx * BATCH)?;
                         files.read(buffers, read_size, config.initial)?;
-                        process_batch::<O, _, _>(buffers, &mut inputs, index, tree, &mask, offset);
+                        process_batch(buffers, &mut inputs, index, tree, &mask, offset);
                         files.output.write_all(buffers.predict.as_bytes())?;
                     } else if let Some(error) = error.take() {
                         return Err(error);
@@ -197,10 +197,10 @@ where
 
             // Read this batch's features + target + previous-step prediction
             // into `buffers`, fold in the candidate tree and recompute the
-            // sampled rows' derivatives into `input`/`index`, then write the
+            // sampled rows' derivatives into `index`, then write the
             // updated predictions out at this batch's slot in `boost.<step>`.
             files.read(&mut buffers, read_size, config.initial)?;
-            process_batch::<O, _, _>(&mut buffers, &mut inputs, index, tree, &mask, offset);
+            process_batch(&mut buffers, &mut inputs, index, tree, &mask, offset);
             files.output.write_all(buffers.predict.as_bytes())?;
         }
         Ok(())
@@ -210,10 +210,10 @@ where
 /// Add the candidate tree's contribution to every row's prediction, then for
 /// the rows selected by `mask` compute their loss derivatives and record them
 /// in `row_index` at the global position `offset + idx`.
-fn process_batch<O: Objective, T: Copy + Into<usize>, I: RowIndexT>(
+fn process_batch<T: Copy + Into<usize>, I: IndexT, O: Objective>(
     buffers: &mut UpdateBuffers<T>,
     inputs: &mut [&mut [T]],
-    row_index: &mut [RowIndex<I>],
+    index: &mut [RowIndex<I, O>],
     tree: Option<&Tree>,
     mask: &[u64],
     offset: usize,
@@ -244,8 +244,8 @@ fn process_batch<O: Objective, T: Copy + Into<usize>, I: RowIndexT>(
         }
         // Recompute the loss derivatives for this row using its true target and
         // the (possibly tree-adjusted) prediction, then store them.
-        let (gradient, hessian) = O::grad_hess(buffers.target[bit], buffers.predict[bit]);
-        row_index[idx] = RowIndex::new(offset + idx, gradient, hessian);
+        let deriv = O::derive(buffers.target[bit], buffers.predict[bit]);
+        index[idx] = RowIndex::new(offset + idx, deriv);
     });
 }
 
