@@ -5,8 +5,8 @@
 //! - `FeatureType`: how a bin is matched (exact or at-or-below threshold).
 //! - `Feature`: one column's name, type, and bin boundaries.
 //! - `Dataset`: the feature matrix, target, predictions, and row gradients.
-//! - `RowIndexT`: integer row-index trait (convertible to and from `usize`).
 //! - `RowIndex`: one row's index plus its gradient and hessian.
+//! - `IndexT`: integer index trait (convertible to and from `usize`).
 //! - `Objective`: loss and derivative provider trait.
 //! - `SquaredLoss`: regression objective (squared error).
 //! - `LogLoss`: classification objective (binary cross-entropy).
@@ -61,8 +61,8 @@ impl Default for Feature {
 }
 
 /// Training data: feature matrix, target, running predictions, and row index.
-#[derive(Clone, Debug)]
-pub struct Dataset<T, I: RowIndexT> {
+#[derive(Clone)]
+pub struct Dataset<T> {
     /// One descriptor per feature column.
     pub features: Vec<Feature>,
     /// One inner vector per feature, one value per row.
@@ -71,28 +71,23 @@ pub struct Dataset<T, I: RowIndexT> {
     pub target: Vec<f32>,
     /// Per-row running predictions accumulated across boosting rounds.
     pub predict: Vec<f32>,
-    /// One entry per row; carries the gradient/hessian for this iteration.
-    pub index: Vec<RowIndex<I>>,
 }
 
-impl<T, I: RowIndexT> Dataset<T, I> {
-    /// Build a new dataset from its parts. `predict` is seeded to `initial`
-    /// for every target, and `index` is initialized to zero derivative.
+impl<T> Dataset<T> {
+    /// Build a new dataset from its parts.
+    /// `predict` is seeded to `initial` for every target.
     pub fn new(
         features: Vec<Feature>,
         inputs: Vec<Vec<T>>,
         target: Vec<f32>,
         initial: f32,
     ) -> Self {
-        let rows = inputs.first().map(|x| x.len()).unwrap_or(0);
-        let index = (0..rows).map(|i| RowIndex::new(i, 0.0, 0.0)).collect();
         let predict = vec![initial; target.len()];
         Self {
             features,
             inputs,
             target,
             predict,
-            index,
         }
     }
 
@@ -103,7 +98,7 @@ impl<T, I: RowIndexT> Dataset<T, I> {
 
     /// Number of rows in the dataset.
     pub fn rows(&self) -> usize {
-        self.inputs.first().map(|x| x.len()).unwrap_or(0)
+        self.inputs.first().map_or(0, |x| x.len())
     }
 
     /// Check that the structure sizes agree.
@@ -112,17 +107,42 @@ impl<T, I: RowIndexT> Dataset<T, I> {
             && self.inputs.iter().all(|col| col.len() == self.rows())
             && (self.target.is_empty() || self.target.len() == self.rows())
             && self.predict.len() == self.target.len()
-            && self.index.len() == self.rows()
     }
 }
 
-/// Integer row-index trait (convertible to and from `usize`).
-pub trait RowIndexT: Copy + Send {
+/// A single row of the dataset with the per-iteration loss derivatives.
+#[derive(Clone, Copy)]
+pub struct RowIndex<I: IndexT, O: Objective> {
+    /// Row position, dataset-wide or sampled-subset-relative.
+    pub index: I,
+    /// Stored gradient/hessian values.
+    pub deriv: O,
+}
+
+impl<I: IndexT, O: Objective> RowIndex<I, O> {
+    /// Constructor; `index` should be validated by the user.
+    pub fn new(index: usize, deriv: O) -> Self {
+        RowIndex {
+            index: I::from_usize(index),
+            deriv,
+        }
+    }
+
+    /// Construct new empty index vector.
+    pub fn new_array(size: usize) -> Vec<Self> {
+        (0..size)
+            .map(|idx| RowIndex::new(idx, O::derive(0.0, 0.0)))
+            .collect()
+    }
+}
+
+/// Integer index trait (convertible to and from `usize`).
+pub trait IndexT: Copy + Send + Sync {
     fn from_usize(index: usize) -> Self;
     fn to_usize(&self) -> usize;
 }
 
-impl RowIndexT for u64 {
+impl IndexT for u64 {
     fn from_usize(index: usize) -> Self {
         index as u64
     }
@@ -132,7 +152,7 @@ impl RowIndexT for u64 {
     }
 }
 
-impl RowIndexT for u32 {
+impl IndexT for u32 {
     fn from_usize(index: usize) -> Self {
         index as u32
     }
@@ -142,39 +162,21 @@ impl RowIndexT for u32 {
     }
 }
 
-/// A single row of the dataset plus the per-iteration loss derivatives.
-#[derive(Clone, Copy, Debug)]
-pub struct RowIndex<T: RowIndexT> {
-    /// Row position in the dataset.
-    pub index: T,
-    /// First derivative of the loss for this row.
-    pub gradient: f32,
-    /// Second derivative of the loss for this row.
-    pub hessian: f32,
-}
-
-impl<T: RowIndexT> RowIndex<T> {
-    /// Constructor; `index` should be validated by the user.
-    pub fn new(index: usize, gradient: f32, hessian: f32) -> Self {
-        RowIndex {
-            index: T::from_usize(index),
-            gradient,
-            hessian,
-        }
-    }
-}
-
 /// A loss function used to drive gradient boosting.
-pub trait Objective {
+pub trait Objective: Copy + Send + Sync {
     /// The loss of a predicted value against the true label.
     fn loss(y: f32, y_pred: f32) -> f32;
 
-    /// The first and second derivatives of the loss with respect to `y_pred`.
-    fn grad_hess(y: f32, y_pred: f32) -> (f32, f32);
+    /// Derive gradient/hessian values of the loss.
+    fn derive(y: f32, y_pred: f32) -> Self;
+
+    /// Return stored gradient/hessian values.
+    fn grad_hess(&self) -> (f32, f32);
 }
 
 /// Regression loss: squared error.
-pub struct SquaredLoss;
+#[derive(Clone, Copy)]
+pub struct SquaredLoss(f32);
 
 impl Objective for SquaredLoss {
     /// Loss: (y^ - y) ^ 2 / 2
@@ -184,13 +186,18 @@ impl Objective for SquaredLoss {
     }
 
     /// Gradient: y^ - y; Hessian: 1.0
-    fn grad_hess(y: f32, y_pred: f32) -> (f32, f32) {
-        (y_pred - y, 1.0)
+    fn derive(y: f32, y_pred: f32) -> Self {
+        Self(y_pred - y)
+    }
+
+    fn grad_hess(&self) -> (f32, f32) {
+        (self.0, 1.0)
     }
 }
 
 /// Classification loss: binary cross-entropy against `y in {0, 1}`.
-pub struct LogLoss;
+#[derive(Clone, Copy)]
+pub struct LogLoss(f32, f32);
 
 impl Objective for LogLoss {
     /// Loss: -(y * log(y^) + (1 - y) * log(1 - y^))
@@ -200,9 +207,13 @@ impl Objective for LogLoss {
     }
 
     /// Gradient: y^ - y; Hessian: y^ * (1 - y^)
-    fn grad_hess(y: f32, y_pred: f32) -> (f32, f32) {
+    fn derive(y: f32, y_pred: f32) -> Self {
         let y_hat = odds(y_pred);
-        (y_hat - y, y_hat * (1.0 - y_hat))
+        Self(y_hat - y, y_hat * (1.0 - y_hat))
+    }
+
+    fn grad_hess(&self) -> (f32, f32) {
+        (self.0, self.1)
     }
 }
 
@@ -220,7 +231,7 @@ mod tests {
         // Small dataset (`u8` bins, `u32` index).
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0, 1, 2]; 2];
-        let data = Dataset::<u8, u32>::new(features, input, vec![1.0; 3], 0.5);
+        let data = Dataset::<u8>::new(features, input, vec![1.0; 3], 0.5);
 
         assert!(data.is_valid());
         assert_eq!(data.rows(), 3);
@@ -233,7 +244,7 @@ mod tests {
         // Large dataset (`u16` bins, `u64` index, target/predict offloaded).
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0; 1000]; 2];
-        let data = Dataset::<u16, u64>::new(features.clone(), input, vec![], 0.0);
+        let data = Dataset::<u16>::new(features.clone(), input, vec![], 0.0);
 
         assert!(data.is_valid());
         assert_eq!(data.rows(), 1000);
@@ -245,11 +256,11 @@ mod tests {
     fn invalid_data() {
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0; 3]; 2];
-        let create = |f, x, y| Dataset::<u8, u32>::new(f, x, y, 0.0);
+        let create = |f, x, y| Dataset::<u8>::new(f, x, y, 0.0);
 
         let missing_features = create(vec![], input.clone(), vec![]);
         assert!(!missing_features.is_valid());
-        let invalid_input = create(features.clone(), vec![vec![0; 3]], vec![]);
+        let invalid_input = create(features.clone(), vec![vec![0; 3], vec![1]], vec![]);
         assert!(!invalid_input.is_valid());
         let invalid_target = create(features.clone(), input.clone(), vec![1.0]);
         assert!(!invalid_target.is_valid());
@@ -258,12 +269,15 @@ mod tests {
     #[test]
     fn squared_loss() {
         assert_eq!(SquaredLoss::loss(1.0, 4.0), 4.5);
-        assert_eq!(SquaredLoss::grad_hess(1.0, 4.0), (3.0, 1.0));
+        assert_eq!(SquaredLoss::derive(1.0, 4.0).grad_hess(), (3.0, 1.0));
     }
 
     #[test]
     fn log_loss() {
         assert_eq!(LogLoss::loss(0.5, 0.75), 0.76187104);
-        assert_eq!(LogLoss::grad_hess(0.5, 0.75), (0.17917871, 0.21789499));
+        assert_eq!(
+            LogLoss::derive(0.5, 0.75).grad_hess(),
+            (0.17917871, 0.21789499)
+        );
     }
 }
