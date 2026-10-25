@@ -472,7 +472,6 @@ mod tests {
             ],
             vec![random_row(), random_row()],
             vec![1.0; NUM_ROWS],
-            0.5,
         )
     }
 
@@ -529,7 +528,6 @@ mod tests {
             row.truncate(sampled_rows);
         }
         data.target.clear();
-        data.predict.clear();
 
         // Run the first update.
         let mut config = UpdateConfig {

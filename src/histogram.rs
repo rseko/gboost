@@ -189,7 +189,6 @@ mod tests {
             vec![Feature::linear("".into(), vec![0.0; 2]); columns],
             vec![[0, 1].repeat(rows / 2); columns],
             vec![0.0; rows],
-            0.0,
         );
         let index = (0..rows)
             .map(|i| RowIndex::new(i, SquaredLoss::derive(1.0, 0.9)))
