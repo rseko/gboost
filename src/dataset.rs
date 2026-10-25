@@ -4,7 +4,7 @@
 //! Structures:
 //! - `FeatureType`: how a bin is matched (exact or at-or-below threshold).
 //! - `Feature`: one column's name, type, and bin boundaries.
-//! - `Dataset`: the feature matrix, target, predictions, and row gradients.
+//! - `Dataset`: the feature matrix and target values.
 //! - `RowIndex`: one row's index plus its gradient and hessian.
 //! - `IndexT`: integer index trait (convertible to and from `usize`).
 //! - `Objective`: loss and derivative provider trait.
@@ -60,7 +60,7 @@ impl Default for Feature {
     }
 }
 
-/// Training data: feature matrix, target, running predictions, and row index.
+/// Training data: feature matrix (X) and target values (y).
 #[derive(Clone)]
 pub struct Dataset<T> {
     /// One descriptor per feature column.
@@ -69,25 +69,15 @@ pub struct Dataset<T> {
     pub inputs: Vec<Vec<T>>,
     /// Per-row target value (classification label or regression value).
     pub target: Vec<f32>,
-    /// Per-row running predictions accumulated across boosting rounds.
-    pub predict: Vec<f32>,
 }
 
 impl<T> Dataset<T> {
     /// Build a new dataset from its parts.
-    /// `predict` is seeded to `initial` for every target.
-    pub fn new(
-        features: Vec<Feature>,
-        inputs: Vec<Vec<T>>,
-        target: Vec<f32>,
-        initial: f32,
-    ) -> Self {
-        let predict = vec![initial; target.len()];
+    pub fn new(features: Vec<Feature>, inputs: Vec<Vec<T>>, target: Vec<f32>) -> Self {
         Self {
             features,
             inputs,
             target,
-            predict,
         }
     }
 
@@ -106,7 +96,6 @@ impl<T> Dataset<T> {
         self.features.len() == self.columns()
             && self.inputs.iter().all(|col| col.len() == self.rows())
             && (self.target.is_empty() || self.target.len() == self.rows())
-            && self.predict.len() == self.target.len()
     }
 }
 
@@ -231,32 +220,30 @@ mod tests {
         // Small dataset (`u8` bins, `u32` index).
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0, 1, 2]; 2];
-        let data = Dataset::<u8>::new(features, input, vec![1.0; 3], 0.5);
+        let data = Dataset::<u8>::new(features, input, vec![1.0; 3]);
 
         assert!(data.is_valid());
         assert_eq!(data.rows(), 3);
         assert_eq!(data.columns(), 2);
-        assert_eq!(data.predict, vec![0.5; 3]);
     }
 
     #[test]
     fn valid_large() {
-        // Large dataset (`u16` bins, `u64` index, target/predict offloaded).
+        // Large dataset (`u16` bins, `u64` index, target offloaded).
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0; 1000]; 2];
-        let data = Dataset::<u16>::new(features.clone(), input, vec![], 0.0);
+        let data = Dataset::<u16>::new(features.clone(), input, vec![]);
 
         assert!(data.is_valid());
         assert_eq!(data.rows(), 1000);
         assert_eq!(data.columns(), 2);
-        assert!(data.predict.is_empty());
     }
 
     #[test]
     fn invalid_data() {
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0; 3]; 2];
-        let create = |f, x, y| Dataset::<u8>::new(f, x, y, 0.0);
+        let create = |f, x, y| Dataset::<u8>::new(f, x, y);
 
         let missing_features = create(vec![], input.clone(), vec![]);
         assert!(!missing_features.is_valid());

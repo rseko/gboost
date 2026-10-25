@@ -20,12 +20,14 @@ use rayon::prelude::*;
 /// within and across chunks are still processed independently, so results
 /// are identical to the sequential path.
 pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
-    data: &mut Dataset<T>,
+    predict: &mut [f32],
     index: &mut [RowIndex<I, O>],
+    data: &Dataset<T>,
     tree: Option<&Tree>,
     parallel: bool,
 ) {
     assert!(data.is_valid());
+    assert_eq!(predict.len(), data.rows());
     assert_eq!(index.len(), data.rows());
 
     if parallel {
@@ -33,7 +35,7 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
         // each chunk gets its base offset so global row positions stay correct.
         const TASK_SIZE: usize = 1024;
         let target_chunks = data.target.par_chunks(TASK_SIZE);
-        let predict_chunks = data.predict.par_chunks_mut(TASK_SIZE);
+        let predict_chunks = predict.par_chunks_mut(TASK_SIZE);
         let index_chunks = index.par_chunks_mut(TASK_SIZE);
 
         index_chunks
@@ -48,9 +50,9 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
             });
     } else {
         if let Some(tree) = tree {
-            update_predict_slice(&mut data.predict, tree, &data.inputs, 0);
+            update_predict_slice(predict, tree, &data.inputs, 0);
         }
-        update_index_slice::<I, O>(index, &data.target, &data.predict, 0);
+        update_index_slice::<I, O>(index, &data.target, predict, 0);
     }
 }
 
@@ -98,7 +100,6 @@ mod tests {
             vec![Feature::default()],
             vec![vec![0; NUM_ROWS]],
             vec![1.0; NUM_ROWS],
-            0.4,
         )
     }
 
@@ -110,11 +111,18 @@ mod tests {
 
     #[test]
     fn update_simple() {
-        let (mut data, tree) = (build_data(), build_tree());
+        let (data, tree) = (build_data(), build_tree());
+        let mut predict = vec![0.4; data.rows()];
         let mut index = RowIndex::<u32, SquaredLoss>::new_array(data.rows());
-        update_small(&mut data, &mut index, Some(&tree), /*parallel*/ false);
+        update_small(
+            &mut predict,
+            &mut index,
+            &data,
+            Some(&tree),
+            /*parallel*/ false,
+        );
 
-        assert!(data.predict.iter().all(|x| *x == 0.5));
+        assert!(predict.iter().all(|x| *x == 0.5));
         index.iter().enumerate().for_each(|(k, v)| {
             assert_eq!(v.index.to_usize(), k);
             assert_eq!(v.deriv.grad_hess(), (-0.5, 1.0));
@@ -123,11 +131,18 @@ mod tests {
 
     #[test]
     fn update_parallel() {
-        let (mut data, tree) = (build_data(), build_tree());
+        let (data, tree) = (build_data(), build_tree());
+        let mut predict = vec![0.4; data.rows()];
         let mut index = RowIndex::<u32, LogLoss>::new_array(data.rows());
-        update_small(&mut data, &mut index, Some(&tree), /*parallel*/ true);
+        update_small(
+            &mut predict,
+            &mut index,
+            &data,
+            Some(&tree),
+            /*parallel*/ true,
+        );
 
-        assert!(data.predict.iter().all(|x| *x == 0.5));
+        assert!(predict.iter().all(|x| *x == 0.5));
         index.iter().enumerate().for_each(|(k, v)| {
             assert_eq!(v.index.to_usize(), k);
             assert_eq!(v.deriv.grad_hess(), (-0.37754065, 0.23500371));

@@ -21,16 +21,16 @@ fn create_dataset(rng: &mut StdRng) -> Dataset<u8> {
         vec![feature; NUM_COLS],
         (0..NUM_COLS).map(|_| new_row()).collect(),
         vec![0.0; NUM_ROWS],
-        0.0,
     )
 }
 
 fn bench_main<T: IndexT>(c: &mut Criterion, prefix: &str) {
     let name = |s: &str| String::from(prefix) + s;
-
     let mut rng = StdRng::seed_from_u64(0);
-    let mut data = create_dataset(&mut rng);
-    let mut index = RowIndex::<T, Loss>::new_array(data.rows());
+
+    let data = create_dataset(&mut rng);
+    let mut predict = vec![0.0; NUM_ROWS];
+    let mut index = RowIndex::<T, Loss>::new_array(NUM_ROWS);
     index.shuffle(&mut rng);
 
     c.bench_function(&name("histogram:1"), |b| {
@@ -41,10 +41,10 @@ fn bench_main<T: IndexT>(c: &mut Criterion, prefix: &str) {
     });
 
     c.bench_function(&name("update:1"), |b| {
-        b.iter(|| update_small(&mut data, &mut index, None, false));
+        b.iter(|| update_small(&mut predict, &mut index, &data, None, false));
     });
     c.bench_function(&name("update:N"), |b| {
-        b.iter(|| update_small(&mut data, &mut index, None, true));
+        b.iter(|| update_small(&mut predict, &mut index, &data, None, true));
     });
 }
 
