@@ -11,6 +11,7 @@
 //! - `NodeSplit`: one split condition on a feature bin plus children and gain.
 
 use crate::dataset::Feature;
+use std::collections::HashSet;
 
 /// A decision tree: a flat, ordered list of [`Node`]s, with node 0 as root.
 #[derive(Clone, Debug)]
@@ -46,6 +47,7 @@ pub struct NodeSplit {
     pub feature_id: usize,
     /// Target bin the row must match, 1-indexed (boundary is
     /// `Feature::bins[bin_id - 1]`). `0` denotes testing a *missing* value.
+    /// A split with `bin_id == 0` and `with_missing == false` is invalid.
     pub bin_id: usize,
     /// `true` for a linear/range split (`bin <= bin_id`).
     /// `false` for an exact one-hot match (`bin == bin_id`).
@@ -66,6 +68,9 @@ impl Tree {
     /// `get_bin` resolves the row's bin for a feature column: `get_bin(feature_id)`
     /// returns the 1-indexed bin, where 0 denotes a missing value (routed by
     /// `NodeSplit::with_missing`). Follows splits until reaching a leaf.
+    ///
+    /// Assumes a well-formed tree (see [`Tree::is_valid`]): it does not
+    /// guard against cycles (infinite loop) nor child ids beyond `nodes.len()`.
     pub fn find_leaf<F>(&self, get_bin: F) -> &Node
     where
         F: Fn(usize) -> usize,
@@ -120,6 +125,23 @@ impl Tree {
             });
         }
         result.join("\n")
+    }
+
+    /// Verify that the tree is valid (not empty, in-bound indices, no loops).
+    pub fn is_valid(&self) -> bool {
+        let mut visited = HashSet::new();
+        let mut stack = Vec::from([0]);
+        while let Some(idx) = stack.pop() {
+            if !visited.insert(idx) || idx >= self.nodes.len() {
+                return false;
+            }
+            if let NodeType::Split(split) = &self.nodes[idx].type_ {
+                for next_id in [split.positive_id, split.negative_id] {
+                    stack.push(next_id);
+                }
+            }
+        }
+        visited.len() == self.nodes.len()
     }
 }
 
@@ -250,5 +272,56 @@ mod tests {
                 1:value=1,cover=0\n    \
                 2:value=2,cover=0"
         );
+    }
+
+    #[test]
+    fn tree_format_context() {
+        let tree = build_tree(/*is_range*/ false, /*with_missing*/ false);
+        let feature = Feature::onehot("name".into(), vec![2.0, 4.0]);
+        assert_eq!(
+            tree.to_string(Some(&[feature])),
+            "0:[name == 4] yes=1,no=2,gain=9.9,cover=0\n    \
+                1:value=1,cover=0\n    \
+                2:value=2,cover=0"
+        );
+    }
+
+    #[test]
+    fn tree_valid() {
+        assert!(build_tree(false, false).is_valid());
+        let single_node_tree = Tree {
+            nodes: vec![Node::default_leaf(0.0)],
+        };
+        assert!(single_node_tree.is_valid());
+    }
+
+    #[test]
+    fn tree_invalid() {
+        let make_split = |l, r| {
+            Node::default_split(NodeSplit {
+                feature_id: 0,
+                bin_id: 1,
+                is_range: true,
+                with_missing: false,
+                positive_id: l,
+                negative_id: r,
+                gain: 0.0,
+            })
+        };
+
+        let empty_tree = Tree { nodes: vec![] };
+        assert!(!empty_tree.is_valid());
+        let bad_tree_index = Tree {
+            nodes: vec![make_split(1, 1)],
+        };
+        assert!(!bad_tree_index.is_valid());
+        let bad_tree_loop = Tree {
+            nodes: vec![make_split(0, 1), Node::default_leaf(0.0)],
+        };
+        assert!(!bad_tree_loop.is_valid());
+        let bad_tree_extra = Tree {
+            nodes: vec![Node::default_leaf(0.0), Node::default_leaf(1.0)],
+        };
+        assert!(!bad_tree_extra.is_valid());
     }
 }
