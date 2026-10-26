@@ -7,6 +7,7 @@
 //! - `update_large`: optional tree update plus gradient/hessian update,
 //!   streaming `BATCH`-row windows from disk, optionally parallelized over
 //!   batches.
+//! - `sanitize_name`: maps a `Feature::name` to a file-system-safe extension.
 
 use crate::dataset::{Dataset, Feature, IndexT, Objective, RowIndex};
 use crate::tree::Tree;
@@ -24,6 +25,11 @@ use zerocopy::{FromBytes, IntoBytes};
 pub const FILENAME_INPUT: &str = "feature";
 pub const FILENAME_TARGET: &str = "target";
 pub const FILENAME_PREDICT: &str = "boost";
+
+/// Sanitize special characters in a feature name.
+pub fn sanitize_name(name: &str) -> String {
+    name.replace(['.', '/', '\\'], "_")
+}
 
 /// Maximum number of rows processed in a single batch. The data is partitioned
 /// into at most `BATCH` rows of each column, and `bits_per_batch` samples are
@@ -66,6 +72,7 @@ where
     O: Objective,
 {
     assert!(data.is_valid());
+    assert!(tree.is_none_or(|t| t.is_valid()));
     assert_eq!(index.len(), data.rows());
 
     // The sampled rows per batch must scale with the dataset size, so the
@@ -296,7 +303,7 @@ impl UpdateFiles {
         let input = features
             .iter()
             .map(|feature| {
-                let name = feature.name.replace(['.', '/', '\\'], "_");
+                let name = sanitize_name(&feature.name);
                 OpenOptions::new()
                     .read(true)
                     .open(path.join(FILENAME_INPUT).with_extension(&name))

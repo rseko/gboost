@@ -8,6 +8,7 @@
 
 use crate::dataset::{Dataset, Feature, IndexT, Objective, RowIndex};
 use rayon::prelude::*;
+use std::collections::HashSet;
 use std::ops::{AddAssign, SubAssign};
 
 /// A histogram of the gradient/hessian accumulated per feature bin.
@@ -26,9 +27,17 @@ pub struct Histogram {
 impl Histogram {
     /// Build an all-zero histogram for `features`, each feature covering
     /// `feat.bins.len() + 1` bins (the value bins plus the missing bin).
-    pub fn new(features: &[Feature]) -> Self {
+    /// Filter out features that are not present in `columns`.
+    pub fn new(features: &[Feature], columns: &[usize]) -> Self {
+        let valid = HashSet::<usize>::from_iter(columns.iter().copied());
         let splits = std::iter::once(0)
-            .chain(features.iter().map(|feat| feat.bins.len() + 1))
+            .chain(features.iter().enumerate().map(|(idx, feat)| {
+                if valid.contains(&idx) {
+                    feat.bins.len() + 1
+                } else {
+                    0
+                }
+            }))
             .scan(0, |acc, size| {
                 *acc += size;
                 Some(*acc)
@@ -53,19 +62,20 @@ impl Histogram {
     /// gradient/hessian (from `index`) is added into that bin. Each
     /// feature's rows are processed independently, so the result is
     /// identical for sequential and parallel execution. If `initial`
-    /// is set, the `index` must be sequentially increasing.
+    /// is set, the `index` must be consecutive (`index[i] == index[0] + i`).
     ///
     /// `parallel` partitions the rows into chunks and folds each chunk
     /// into its own histogram, then sums the partials into the result.
     pub fn build<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
         data: &Dataset<T>,
+        columns: &[usize],
         index: &[RowIndex<I, O>],
         initial: bool,
         parallel: bool,
     ) -> Self {
         assert!(data.columns() > 0 && data.rows() >= index.len());
 
-        let mut result = Self::new(&data.features);
+        let mut result = Self::new(&data.features, columns);
         if parallel {
             const TASK_FACTOR: usize = 1024;
             let total_bins = result.data.len();
@@ -142,11 +152,15 @@ fn build_line<T: Copy + Into<usize>, I: IndexT, O: Objective>(
     index: &[RowIndex<I, O>],
     initial: bool,
 ) {
+    if result.is_empty() {
+        return;
+    }
     let mut update = |idx: T, (grad, hess): (f32, f32)| {
         let bin = &mut result[idx.into()];
         bin.0 += f64::from(grad);
         bin.1 += f64::from(hess);
     };
+
     if initial {
         let offset = index[0].index.to_usize();
         for (item, &hpos) in index.iter().zip(row.iter().skip(offset)) {
@@ -208,14 +222,14 @@ mod tests {
     #[test]
     fn histogram_simple() {
         let (data, index) = build_data_and_index(/*columns*/ 1, /*rows*/ 64);
-        let hist = Histogram::build(&data, &index, true, /*parallel*/ false);
+        let hist = Histogram::build(&data, &[0], &index, true, /*parallel*/ false);
         assert_almost_equal(hist.get(0), &[(-3.2, 32.), (-3.2, 32.), (0., 0.)]);
     }
 
     #[test]
     fn histogram_parallel() {
         let (data, index) = build_data_and_index(/*columns*/ 2, /*rows*/ 20);
-        let hist = Histogram::build(&data, &index, true, /*parallel*/ true);
+        let hist = Histogram::build(&data, &[0, 1], &index, true, /*parallel*/ true);
         assert_almost_equal(hist.get(0), &[(-1., 10.), (-1., 10.), (0., 0.)]);
         assert_eq!(hist.get(1), hist.get(0));
     }
@@ -223,7 +237,7 @@ mod tests {
     #[test]
     fn parallel_split() {
         let (data, index) = build_data_and_index(/*columns*/ 3, /*rows*/ 100_000);
-        let hist = Histogram::build(&data, &index, true, /*parallel*/ true);
+        let hist = Histogram::build(&data, &[0, 1, 2], &index, true, /*parallel*/ true);
         assert_almost_equal(hist.get(2), &[(-5e3, 5e4), (-5e3, 5e4), (0., 0.)]);
     }
 
@@ -232,7 +246,33 @@ mod tests {
         let (data, mut index) = build_data_and_index(/*columns*/ 1, /*rows*/ 64);
         let mut rng = StdRng::seed_from_u64(0);
         index.shuffle(&mut rng);
-        let hist = Histogram::build(&data, &index, /*initial*/ false, false);
+        let hist = Histogram::build(&data, &[0], &index, /*initial*/ false, false);
         assert_almost_equal(hist.get(0), &[(-3.2, 32.), (-3.2, 32.), (0., 0.)]);
+    }
+
+    #[test]
+    fn partial_build() {
+        let (data, mut index) = build_data_and_index(/*columns*/ 10, /*rows*/ 10);
+        index.truncate(5);
+        let hist = Histogram::build(&data, &[0], &index, false, true);
+        assert_almost_equal(hist.get(0), &[(-0.3, 3.), (-0.2, 2.), (0., 0.)]);
+        assert_eq!(hist.get(1), &[]);
+        assert_eq!(hist.data.len(), 3);
+    }
+
+    #[test]
+    fn histogram_operations() {
+        let (data, index) = build_data_and_index(/*columns*/ 2, /*rows*/ 10);
+        let hist = Histogram::build(&data, &[0, 1], &index, false, false);
+
+        let mut hist1 = hist.clone();
+        hist1 += &hist.data;
+        for (a, b) in hist1.data.iter().zip(hist.data.iter()) {
+            assert_eq!(*a, (b.0 * 2.0, b.1 * 2.0));
+        }
+
+        let mut hist2 = hist1.clone();
+        hist2 -= &hist.data;
+        assert_eq!(hist2.data, hist.data);
     }
 }

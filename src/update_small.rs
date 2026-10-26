@@ -27,6 +27,7 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
     parallel: bool,
 ) {
     assert!(data.is_valid());
+    assert!(tree.is_none_or(|t| t.is_valid()));
     assert_eq!(predict.len(), data.rows());
     assert_eq!(index.len(), data.rows());
 

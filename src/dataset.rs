@@ -91,9 +91,10 @@ impl<T> Dataset<T> {
         self.inputs.first().map_or(0, |x| x.len())
     }
 
-    /// Check that the structure sizes agree.
+    /// Verify that the dataset is valid (sizes match).
     pub fn is_valid(&self) -> bool {
-        self.features.len() == self.columns()
+        self.columns() > 0
+            && self.features.len() == self.columns()
             && self.inputs.iter().all(|col| col.len() == self.rows())
             && (self.target.is_empty() || self.target.len() == self.rows())
     }
@@ -217,7 +218,7 @@ mod tests {
 
     #[test]
     fn valid_small() {
-        // Small dataset (`u8` bins, `u32` index).
+        // Small dataset (`u8` bins).
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0, 1, 2]; 2];
         let data = Dataset::<u8>::new(features, input, vec![1.0; 3]);
@@ -229,7 +230,7 @@ mod tests {
 
     #[test]
     fn valid_large() {
-        // Large dataset (`u16` bins, `u64` index, target offloaded).
+        // Large dataset (`u16` bins, target offloaded).
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0; 1000]; 2];
         let data = Dataset::<u16>::new(features.clone(), input, vec![]);
@@ -245,12 +246,22 @@ mod tests {
         let input = vec![vec![0; 3]; 2];
         let create = |f, x, y| Dataset::<u8>::new(f, x, y);
 
-        let missing_features = create(vec![], input.clone(), vec![]);
-        assert!(!missing_features.is_valid());
+        let empty_dataset = create(vec![], vec![], vec![]);
+        assert!(!empty_dataset.is_valid());
+        let invalid_features = create(vec![Feature::default()], input.clone(), vec![]);
+        assert!(!invalid_features.is_valid());
         let invalid_input = create(features.clone(), vec![vec![0; 3], vec![1]], vec![]);
         assert!(!invalid_input.is_valid());
         let invalid_target = create(features.clone(), input.clone(), vec![1.0]);
         assert!(!invalid_target.is_valid());
+    }
+
+    #[test]
+    fn default_index() {
+        let index = RowIndex::<u32, LogLoss>::new_array(10);
+        for (idx, item) in index.iter().enumerate() {
+            assert_eq!(item.index.to_usize(), idx);
+        }
     }
 
     #[test]

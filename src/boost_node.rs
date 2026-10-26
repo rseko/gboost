@@ -9,6 +9,8 @@
 //! Functions:
 //! - `find_split`: find best split in one feature's histogram.
 //! - `find_all_splits`: best split for each node across its candidate columns.
+//! - `calc_gain`: a split side's regularized gain, `apply_l1(grad)^2 / (hess + l2)`.
+//! - `apply_l1`: soft-threshold the gradient by the L1 regularizer.
 
 use crate::dataset::{Dataset, Feature, FeatureType, IndexT, Objective, RowIndex};
 use crate::histogram::Histogram;
@@ -102,13 +104,17 @@ pub fn find_split(
     feature_type: FeatureType,
 ) -> Option<SplitCandidate> {
     let mut result: Option<SplitCandidate> = None;
-    let make_stats =
-        |(grad, hess)| SplitStats::new(grad, hess, options.reg_alpha, options.reg_lambda);
+    let make_stats = |(grad, hess)| {
+        let gain = calc_gain(grad, hess, options.reg_alpha, options.reg_lambda);
+        SplitStats::new(grad, hess, gain)
+    };
+
+    let epsilon = f32::MIN_POSITIVE as f64;
+    let min_size = options.min_child_weight.max(epsilon);
+    let min_gain = (options.min_split_gain - epsilon).max(0.0);
 
     let undef = histogram[0];
     let total = (stats.gradient, stats.hessian);
-    let epsilon = f32::MIN_POSITIVE as f64;
-    let min_size = options.min_child_weight.max(epsilon);
     if total.1 < min_size * 2.0 {
         return None; // no further splits are possible
     }
@@ -127,9 +133,8 @@ pub fn find_split(
     // with the objectives in `dataset`, zero hessian implies zero gradient,
     // so it contributes nothing to any split.
     let (mut left, mut right) = ((0.0, 0.0), total);
-    for bin_id in start..end {
-        let (grad, hess) = histogram[bin_id];
-        if hess == 0.0 {
+    for (bin_id, (grad, hess)) in histogram.iter().enumerate().take(end).skip(start) {
+        if *hess == 0.0 {
             continue;
         }
         (left, right) = if is_linear && bin_id > 1 {
@@ -138,7 +143,7 @@ pub fn find_split(
                 (right.0 - grad, right.1 - hess),
             )
         } else {
-            ((grad, hess), (total.0 - grad, total.1 - hess))
+            ((*grad, *hess), (total.0 - grad, total.1 - hess))
         };
         // The side the positive rows land on must carry enough weight; the
         // missing rows that join it (see below) are included in `left` when
@@ -149,14 +154,14 @@ pub fn find_split(
 
         let mut positive = make_stats(left);
         let mut negative = make_stats(right);
-        let mut with_missing = false;
+        let mut with_missing = bin_id == 0;
 
         // Try routing the missing rows into the positive side. The split is
         // allowed only when the negative side stays heavy enough, and it
         // takes over either unconditionally when it fixes an under-weight
         // positive side, or when it raises the combined gain.
         let left_too_small = left.1 < min_size;
-        if undef.1 > 0.0 && right.1 - undef.1 >= min_size && bin_id > 0 {
+        if undef.1 > 0.0 && right.1 - undef.1 >= min_size && !with_missing {
             let positive_alt = make_stats((left.0 + undef.0, left.1 + undef.1));
             let negative_alt = make_stats((right.0 - undef.0, right.1 - undef.1));
             if left_too_small
@@ -174,8 +179,8 @@ pub fn find_split(
         // this node's own gain term, must beat the best candidate so far
         // and the minimum split gain, and be strictly positive.
         let gain = positive.gain + negative.gain - stats.gain;
-        let best = result.as_ref().map_or(options.min_split_gain, |x| x.gain);
-        if gain >= best && gain > 0.0 {
+        let best = result.as_ref().map_or(min_gain, |x| x.gain);
+        if gain > best {
             result = Some(SplitCandidate {
                 // Set by the caller to the feature being scanned.
                 feature_id: 0,
@@ -278,10 +283,10 @@ impl<'a, I: IndexT, O: Objective> Splittable<'a, I, O> {
         // position that separates the two sides.
         let pos = match feature.type_ {
             FeatureType::OneHot => {
-                partition_onehot(&mut self.index, row, split.bin_id, split.with_missing)
+                partition_onehot(self.index, row, split.bin_id, split.with_missing)
             }
             FeatureType::Linear => {
-                partition_linear(&mut self.index, row, split.bin_id, split.with_missing)
+                partition_linear(self.index, row, split.bin_id, split.with_missing)
             }
         };
         let (index_left, index_right) = self.index.split_at_mut(pos);
@@ -290,13 +295,13 @@ impl<'a, I: IndexT, O: Objective> Splittable<'a, I, O> {
         // rebuild the smaller side from scratch, subtracting it to recover
         // the other side's histogram - cheaper than building both.
         let (hist_left, hist_right) = if final_split {
-            (Histogram::new(&[]), Histogram::new(&[]))
+            (Histogram::new(&[], &[]), Histogram::new(&[], &[]))
         } else if index_left.len() < index_right.len() {
-            let hist = Histogram::build(data, &index_left, false, parallel);
+            let hist = Histogram::build(data, &self.columns, index_left, false, parallel);
             self.histogram -= &hist.data;
             (hist, self.histogram)
         } else {
-            let hist = Histogram::build(data, &index_right, false, parallel);
+            let hist = Histogram::build(data, &self.columns, index_right, false, parallel);
             self.histogram -= &hist.data;
             (self.histogram, hist)
         };
@@ -318,14 +323,18 @@ impl<'a, I: IndexT, O: Objective> Splittable<'a, I, O> {
 }
 
 impl SplitStats {
-    /// Build a regularized `SplitStats` from one side's grad/hess sums.
-    pub fn new(gradient: f64, hessian: f64, l1: f64, l2: f64) -> Self {
+    pub fn new(gradient: f64, hessian: f64, gain: f64) -> Self {
         Self {
             gradient,
             hessian,
-            gain: apply_l1(gradient, l1).powi(2) / (hessian + l2),
+            gain,
         }
     }
+}
+
+/// Calculate regularized gain.
+pub fn calc_gain(gradient: f64, hessian: f64, l1: f64, l2: f64) -> f64 {
+    apply_l1(gradient, l1).powi(2) / (hessian + l2)
 }
 
 /// Soft-threshold `gradient` by `l1` - the L1-regularized gradient.
