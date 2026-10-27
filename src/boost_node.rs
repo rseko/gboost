@@ -83,7 +83,7 @@ pub struct SplitStats {
     pub gradient: f64,
     /// Sum of the rows in this side's hessian.
     pub hessian: f64,
-    /// `apply_l1(grad).^2 / (hess + l2)` - the side's contribution to gain.
+    /// `apply_l1(grad)^2 / (hess + l2)` - the side's contribution to gain.
     pub gain: f64,
 }
 
@@ -391,5 +391,262 @@ fn partition_linear<T: Copy + Into<usize>, I: IndexT, O: Objective>(
             let bin = row[item.index.to_usize()].into();
             bin.overflowing_sub(1).0 < limit
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset::SquaredLoss;
+
+    fn build_splittable() -> Splittable<'static, u32, SquaredLoss> {
+        let (v0, v1, v2, v3) = ((0., 0.), (0.25, 1.), (0.5, 2.), (0.75, 3.));
+        let histogram = Histogram {
+            data: vec![v0, v1, v2, v2, v1, v1, v2, v1, v3, v1, v1, v0],
+            splits: vec![0, 4, 8, 12],
+        };
+        let stats = SplitStats {
+            gradient: 1.25,
+            hessian: 5.0,
+            gain: 0.0,
+        };
+        Splittable {
+            index: &mut [],
+            histogram,
+            stats,
+            columns: vec![0, 1, 2],
+        }
+    }
+
+    fn test_find_split(
+        splittable: Splittable<'_, u32, SquaredLoss>,
+        features: &[Feature],
+        options: &BoostNodeOptions,
+    ) -> Option<SplitCandidate> {
+        let mut result = find_all_splits(&[splittable], features, options, false);
+        result.pop().unwrap()
+    }
+
+    #[test]
+    fn linear_simple() {
+        let features = vec![Feature::default(); 3];
+        let options = BoostNodeOptions {
+            reg_alpha: 0.25,
+            reg_lambda: 0.1,
+            ..Default::default()
+        };
+        let expected_gain = 0.13719512195121952;
+        assert_eq!(
+            test_find_split(build_splittable(), &features, &options),
+            Some(SplitCandidate {
+                feature_id: 2,
+                bin_id: 1,
+                with_missing: false,
+                positive: SplitStats::new(0.25, 1.0, 0.0),
+                negative: SplitStats::new(1.0, 4.0, expected_gain),
+                gain: expected_gain,
+            })
+        );
+    }
+
+    #[test]
+    fn linear_min_split_gain() {
+        let features = vec![Feature::default(); 3];
+        let options = |v: f64| BoostNodeOptions {
+            min_split_gain: v,
+            ..Default::default()
+        };
+        let res1 = test_find_split(build_splittable(), &features, &options(0.32));
+        assert!(res1.is_none(), "{res1:?}");
+
+        let res2 = test_find_split(build_splittable(), &features, &options(0.3));
+        assert!(res2.is_some(), "{res2:?}");
+        assert_eq!(res2.unwrap().gain, 0.3125);
+    }
+
+    #[test]
+    fn linear_min_child_weight() {
+        let features = vec![Feature::default(); 3];
+        let options = |v: f64| BoostNodeOptions {
+            min_child_weight: v,
+            ..Default::default()
+        };
+        let mut splittable = build_splittable();
+        splittable.histogram.data[2].0 = -1.0;
+        assert_eq!(
+            test_find_split(splittable, &features, &options(2.0)),
+            Some(SplitCandidate {
+                feature_id: 0,
+                bin_id: 2,
+                with_missing: false,
+                positive: SplitStats::new(-0.75, 3.0, 0.1875),
+                negative: SplitStats::new(2.0, 2.0, 2.0),
+                gain: 2.1875,
+            })
+        );
+
+        let too_large = test_find_split(build_splittable(), &features, &options(5.0));
+        assert!(too_large.is_none(), "{too_large:?}");
+    }
+
+    #[test]
+    fn linear_allow_missing_splits() {
+        let features = vec![Feature::default(); 3];
+        let options = BoostNodeOptions {
+            allow_missing_splits: true,
+            ..Default::default()
+        };
+        let mut splittable = build_splittable();
+        splittable.histogram.data[4].0 = -1.0;
+        assert_eq!(
+            test_find_split(splittable, &features, &options),
+            Some(SplitCandidate {
+                feature_id: 1,
+                bin_id: 0,
+                with_missing: true,
+                positive: SplitStats::new(-1.0, 1.0, 1.0),
+                negative: SplitStats::new(2.25, 4.0, 1.265625),
+                gain: 2.265625,
+            })
+        );
+    }
+
+    #[test]
+    fn onehot_simple() {
+        let features = vec![Feature::onehot("".into(), vec![]); 3];
+        let mut splittable = build_splittable();
+        splittable.histogram.data[4].0 = -2.0;
+        splittable.histogram.data[7].0 = -2.0;
+        assert_eq!(
+            test_find_split(splittable, &features, &BoostNodeOptions::default()),
+            Some(SplitCandidate {
+                feature_id: 1,
+                bin_id: 3,
+                with_missing: true,
+                positive: SplitStats::new(-4.0, 2.0, 8.0),
+                negative: SplitStats::new(5.25, 3.0, 9.1875),
+                gain: 17.1875,
+            })
+        );
+    }
+
+    #[test]
+    fn search_parallel() {
+        let features = vec![Feature::default(); 3];
+        let result = find_all_splits(
+            &[build_splittable()],
+            &features,
+            &BoostNodeOptions::default(),
+            /*parallel*/ true,
+        );
+        assert_eq!(
+            *result.last().unwrap(),
+            Some(SplitCandidate {
+                feature_id: 2,
+                bin_id: 1,
+                with_missing: false,
+                positive: SplitStats::new(0.25, 1.0, 0.0625),
+                negative: SplitStats::new(1.0, 4.0, 0.25),
+                gain: 0.3125,
+            })
+        );
+    }
+
+    #[test]
+    fn regularization() {
+        assert_eq!(apply_l1(-0.5, 0.3), -0.2);
+        assert_eq!(apply_l1(-0.25, 0.3), 0.0);
+        assert_eq!(apply_l1(0.25, 0.3), 0.0);
+        assert_eq!(apply_l1(0.5, 0.3), 0.2);
+        assert_eq!(calc_gain(2.0, 1.0, 0.2, 0.2), 2.7);
+    }
+
+    #[test]
+    fn partition_onehot() {
+        let row = vec![0_u8, 1, 2, 3, 4];
+        let mut index = RowIndex::<u32, SquaredLoss>::new_array(5);
+        assert_eq!(super::partition_onehot(&mut index, &row, 3, false), 1);
+        assert_eq!(index[0].index, 3);
+
+        index.sort_by_key(|x| x.index);
+        assert_eq!(super::partition_onehot(&mut index, &row, 3, true), 2);
+        assert!(index[..2].iter().all(|x| x.index == 0 || x.index == 3));
+    }
+
+    #[test]
+    fn partition_linear() {
+        let row = vec![0_u8, 1, 2, 3, 4];
+        let mut index = RowIndex::<u32, SquaredLoss>::new_array(5);
+        assert_eq!(super::partition_linear(&mut index, &row, 2, false), 2);
+        assert!(index[..2].iter().all(|x| x.index == 1 || x.index == 2));
+
+        index.sort_by_key(|x| x.index);
+        assert_eq!(super::partition_linear(&mut index, &row, 2, true), 3);
+        assert!(index[..3].iter().all(|x| x.index <= 2));
+    }
+
+    #[test]
+    fn split() {
+        let data = Dataset::<u16>::new(
+            vec![Feature::linear("".into(), vec![1., 2., 3.]); 3],
+            vec![
+                vec![3, 2, 1, 2, 3], // feature being split
+                vec![2, 1, 0, 3, 2],
+                vec![0, 1, 0, 2, 0],
+            ],
+            vec![],
+        );
+        let stats_1 = SplitStats::new(0.1, 0.2, 0.3);
+        let stats_2 = SplitStats::new(0.4, 0.5, 0.6);
+        let candidate = |bin_id: usize| SplitCandidate {
+            feature_id: 0,
+            bin_id,
+            with_missing: false,
+            positive: stats_1.clone(),
+            negative: stats_2.clone(),
+            gain: 0.0,
+        };
+
+        let make_index = |n: usize| -> Vec<RowIndex<u32, SquaredLoss>> {
+            (0..n)
+                .map(|i| RowIndex::new(i, SquaredLoss::derive(0.0, 0.25)))
+                .collect()
+        };
+        let make_hist = |data: &[u32]| -> Vec<(f64, f64)> {
+            data.iter().map(|&x| (x as f64 * 0.25, x as f64)).collect()
+        };
+
+        // Left side is smaller.
+        let splittable = Splittable {
+            index: &mut make_index(5),
+            ..build_splittable()
+        };
+        let (left, right) = splittable.split(candidate(1), &data, false, false);
+        assert_eq!(left.index.len(), 1);
+        assert_eq!(left.histogram.get(0), make_hist(&[0, 1, 0, 0]));
+        assert_eq!(right.index.len(), 4);
+        assert_eq!(right.histogram.get(0), make_hist(&[0, 0, 2, 2]));
+
+        // Right side is smaller.
+        let splittable = Splittable {
+            index: &mut make_index(5),
+            ..build_splittable()
+        };
+        let (left, right) = splittable.split(candidate(2), &data, false, false);
+        assert_eq!(left.index.len(), 3);
+        assert_eq!(left.histogram.get(0), make_hist(&[0, 1, 2, 0]));
+        assert_eq!(right.index.len(), 2);
+        assert_eq!(right.histogram.get(0), make_hist(&[0, 0, 0, 2]));
+
+        // Final split (no histograms).
+        let splittable = Splittable {
+            index: &mut make_index(5),
+            ..build_splittable()
+        };
+        let (left, right) = splittable.split(candidate(3), &data, true, true);
+        assert!(left.histogram.data.is_empty());
+        assert_eq!(left.stats, stats_1);
+        assert!(right.histogram.data.is_empty());
+        assert_eq!(right.stats, stats_2);
     }
 }
