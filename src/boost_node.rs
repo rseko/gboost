@@ -205,7 +205,7 @@ pub fn find_split(
 /// `parallel` only changes how that work is distributed across threads, never
 /// which candidate is chosen.
 pub fn find_all_splits<I: IndexT, O: Objective>(
-    splittables: &[Splittable<I, O>],
+    splittables: Vec<&Splittable<I, O>>,
     features: &[Feature],
     options: &BoostNodeOptions,
     parallel: bool,
@@ -225,7 +225,7 @@ pub fn find_all_splits<I: IndexT, O: Objective>(
         let candidates = tasks
             .into_par_iter()
             .filter_map(|(idx, col)| {
-                let item = &splittables[idx];
+                let item = splittables[idx];
                 let (hist, feat) = (item.histogram.get(col), &features[col]);
                 let mut res = find_split(hist, &item.stats, options, feat.type_)?;
                 res.feature_id = col;
@@ -257,7 +257,7 @@ pub fn find_all_splits<I: IndexT, O: Objective>(
                 })
                 .max_by(|a, b| a.gain.partial_cmp(&b.gain).unwrap())
         };
-        splittables.iter().map(find_best_split).collect()
+        splittables.into_iter().map(find_best_split).collect()
     }
 }
 
@@ -423,7 +423,7 @@ mod tests {
         features: &[Feature],
         options: &BoostNodeOptions,
     ) -> Option<SplitCandidate> {
-        let mut result = find_all_splits(&[splittable], features, options, false);
+        let mut result = find_all_splits(vec![&splittable], features, options, false);
         result.pop().unwrap()
     }
 
@@ -552,7 +552,7 @@ mod tests {
     fn search_parallel() {
         let features = vec![Feature::default(); 3];
         let result = find_all_splits(
-            &[build_splittable()],
+            vec![&build_splittable()],
             &features,
             &BoostNodeOptions::default(),
             /*parallel*/ true,
