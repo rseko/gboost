@@ -23,7 +23,7 @@ pub struct Histogram {
     /// One (grad, hess) pair per bin.
     pub data: Vec<Item>,
     /// Per-feature start offsets into `data`.
-    pub splits: Vec<usize>,
+    splits: Vec<usize>,
 }
 
 impl Histogram {

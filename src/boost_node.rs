@@ -47,7 +47,7 @@ impl Default for BoostNodeOptions {
 
 /// One node's state: the rows that reach it, the histogram accumulated over
 /// those rows (per bin of each feature), and the node's own statistics.
-pub struct Splittable<'a, I: IndexT, O: Objective> {
+pub(crate) struct Splittable<'a, I: IndexT, O: Objective> {
     /// The rows routed to this node, in arbitrary order.
     pub index: &'a mut [RowIndex<I, O>],
     /// Per-(feature, bin) gradient/hessian sums over `index`.
@@ -59,7 +59,7 @@ pub struct Splittable<'a, I: IndexT, O: Objective> {
 /// A candidate split of one feature: its bin, whether it folds missing rows
 /// into the positive side, the resulting side statistics, and the gain.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SplitCandidate {
+pub(crate) struct SplitCandidate {
     /// Feature column this split tests.
     pub feature_id: usize,
     /// Target bin the row must match, 1-indexed (0 means undefined).
@@ -77,7 +77,7 @@ pub struct SplitCandidate {
 /// One split side's aggregate: the gradient/hessian sums and the
 /// regularized gain term they drive.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SplitStats {
+pub(crate) struct SplitStats {
     /// Sum of the rows in this side's gradient.
     pub gradient: f64,
     /// Sum of the rows in this side's hessian.
@@ -96,7 +96,7 @@ pub struct SplitStats {
 ///
 /// `feature_id` is filled in by the caller per feature, and `bin_id` is
 /// 1-indexed (compare against `Feature::bins[bin_id - 1]`).
-pub fn find_split(
+pub(crate) fn find_split(
     histogram: &[(f64, f64)],
     stats: &SplitStats,
     options: &BoostNodeOptions,
@@ -204,7 +204,7 @@ pub fn find_split(
 ///
 /// `parallel` only changes how that work is distributed across threads, never
 /// which candidate is chosen.
-pub fn find_all_splits<I: IndexT, O: Objective>(
+pub(crate) fn find_all_splits<I: IndexT, O: Objective>(
     splittables: Vec<&Splittable<I, O>>,
     features: &[Feature],
     options: &BoostNodeOptions,
@@ -400,11 +400,11 @@ mod tests {
 
     // Build test histogram: 3 columns, 5 rows, 3+1 bins.
     fn build_splittable() -> Splittable<'static, u32, SquaredLoss> {
+        let feature = Feature::linear("".into(), vec![1., 2., 3.]);
+        let mut histogram = Histogram::new(&vec![feature; 3], None);
+
         let (v0, v1, v2, v3) = ((0., 0.), (0.25, 1.), (0.5, 2.), (0.75, 3.));
-        let histogram = Histogram {
-            data: vec![v0, v1, v2, v2, v1, v1, v2, v1, v3, v1, v1, v0],
-            splits: vec![0, 4, 8, 12],
-        };
+        histogram.data = vec![v0, v1, v2, v2, v1, v1, v2, v1, v3, v1, v1, v0];
         let stats = SplitStats {
             gradient: 1.25,
             hessian: 5.0,
