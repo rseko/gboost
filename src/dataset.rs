@@ -233,7 +233,7 @@ mod tests {
         // Large dataset (`u16` bins, target offloaded).
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0; 1000]; 2];
-        let data = Dataset::<u16>::new(features.clone(), input, vec![]);
+        let data = Dataset::<u16>::new(features, input, vec![]);
 
         assert!(data.is_valid());
         assert_eq!(data.rows(), 1000);

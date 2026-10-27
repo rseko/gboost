@@ -11,6 +11,8 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 use std::ops::{AddAssign, SubAssign};
 
+type Item = (f64, f64);
+
 /// A histogram of the gradient/hessian accumulated per feature bin.
 ///
 /// `data` holds one (grad, hess) pair per bin, laid out feature-major;
@@ -19,7 +21,7 @@ use std::ops::{AddAssign, SubAssign};
 #[derive(Clone)]
 pub struct Histogram {
     /// One (grad, hess) pair per bin.
-    pub data: Vec<(f64, f64)>,
+    pub data: Vec<Item>,
     /// Per-feature start offsets into `data`.
     pub splits: Vec<usize>,
 }
@@ -28,11 +30,10 @@ impl Histogram {
     /// Build an all-zero histogram for `features`, each feature covering
     /// `feat.bins.len() + 1` bins (the value bins plus the missing bin).
     /// Filter out features that are not present in `columns`.
-    pub fn new(features: &[Feature], columns: &[usize]) -> Self {
-        let valid = HashSet::<usize>::from_iter(columns.iter().copied());
+    pub fn new(features: &[Feature], columns: Option<&HashSet<usize>>) -> Self {
         let splits = std::iter::once(0)
             .chain(features.iter().enumerate().map(|(idx, feat)| {
-                if valid.contains(&idx) {
+                if columns.is_none_or(|c| c.contains(&idx)) {
                     feat.bins.len() + 1
                 } else {
                     0
@@ -50,9 +51,17 @@ impl Histogram {
     }
 
     /// The (grad, hess) pairs of feature `column`.
-    pub fn get(&self, column: usize) -> &[(f64, f64)] {
+    pub fn get(&self, column: usize) -> &[Item] {
         let range = self.splits[column]..self.splits[column + 1];
         &self.data[range]
+    }
+
+    /// Return an iterator over non-empty column indices.
+    pub fn iter(&self) -> HistogramIter<'_> {
+        HistogramIter {
+            splits: &self.splits,
+            index: 0,
+        }
     }
 
     /// Build the full histogram from `data`'s per-row `index` values.
@@ -68,19 +77,26 @@ impl Histogram {
     /// into its own histogram, then sums the partials into the result.
     pub fn build<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
         data: &Dataset<T>,
-        columns: &[usize],
+        columns: Option<&HashSet<usize>>,
         index: &[RowIndex<I, O>],
         initial: bool,
         parallel: bool,
     ) -> Self {
-        assert!(data.columns() > 0 && data.rows() >= index.len());
-
         let mut result = Self::new(&data.features, columns);
+        assert!(!result.data.is_empty());
+        assert!(data.rows() >= index.len());
+
         if parallel {
             const TASK_FACTOR: usize = 1024;
+            // Calculate split-K batch size: rows are partitioned into
+            // `batch_count` chunks, each folding into its own partial
+            // histogram of `total_bins` cells, then summed into the result.
+            // `batch_size` is the row count per chunk, heuristic-scaled
+            // from the average bin count per contributing feature.
             let total_bins = result.data.len();
-            let batch_size = total_bins.div_ceil(data.columns()) * TASK_FACTOR;
-            let batch_count = data.rows().div_ceil(batch_size);
+            let total_cols = columns.map_or(data.columns(), |c| c.len());
+            let batch_size = total_bins.div_ceil(total_cols) * TASK_FACTOR;
+            let batch_count = index.len().div_ceil(batch_size);
 
             if batch_count > 1 {
                 // Many row chunks: each fold runs in parallel into a private
@@ -123,23 +139,65 @@ impl Histogram {
         }
         result
     }
+
+    /// Keep only the features listed in `columns`: every other feature is
+    /// collapsed to an empty span (zero bins). `data` is compacted in place
+    /// to hold only the kept features' bins, and the `splits` offsets are
+    /// rebased into the compacted layout; `splits` keeps its length, so
+    /// `get` can still be called with the original column ids.
+    pub fn compress(&mut self, columns: &HashSet<usize>) {
+        let (mut src, mut dst) = (0, 0);
+        for idx in 0..self.splits.len() - 1 {
+            let end = self.splits[idx + 1];
+            if columns.contains(&idx) && src < end {
+                self.data.copy_within(src..end, dst);
+                dst += end - src;
+            }
+            src = end;
+            self.splits[idx + 1] = dst;
+        }
+        self.data.truncate(dst);
+    }
 }
 
-impl AddAssign<&[(f64, f64)]> for Histogram {
+impl AddAssign<&[Item]> for Histogram {
     /// Add a full histogram into `self` bin by bin.
-    fn add_assign(&mut self, rhs: &[(f64, f64)]) {
+    fn add_assign(&mut self, rhs: &[Item]) {
+        assert_eq!(rhs.len(), self.data.len());
         for (dst, src) in self.data.iter_mut().zip(rhs) {
             *dst = (dst.0 + src.0, dst.1 + src.1);
         }
     }
 }
 
-impl SubAssign<&[(f64, f64)]> for Histogram {
+impl SubAssign<&[Item]> for Histogram {
     /// Subtract a full histogram from `self` bin by bin.
-    fn sub_assign(&mut self, rhs: &[(f64, f64)]) {
+    fn sub_assign(&mut self, rhs: &[Item]) {
+        assert_eq!(rhs.len(), self.data.len());
         for (dst, src) in self.data.iter_mut().zip(rhs) {
             *dst = (dst.0 - src.0, dst.1 - src.1);
         }
+    }
+}
+
+/// Simple iterator over non-empty column indices.
+pub struct HistogramIter<'a> {
+    splits: &'a [usize],
+    index: usize,
+}
+
+impl<'a> Iterator for HistogramIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<usize> {
+        while self.index + 1 < self.splits.len() {
+            self.index += 1;
+            let (start, end) = (self.splits[self.index - 1], self.splits[self.index]);
+            if start != end {
+                return Some(self.index - 1);
+            }
+        }
+        None
     }
 }
 
@@ -147,7 +205,7 @@ impl SubAssign<&[(f64, f64)]> for Histogram {
 /// into `result`, one feature's slice. Each row lands in the bin of its
 /// value for this feature: `result[row[item.index]]`.
 fn build_line<T: Copy + Into<usize>, I: IndexT, O: Objective>(
-    result: &mut [(f64, f64)],
+    result: &mut [Item],
     row: &[T],
     index: &[RowIndex<I, O>],
     initial: bool,
@@ -211,7 +269,7 @@ mod tests {
     }
 
     // Floating-point compare helper.
-    fn assert_almost_equal(actual: &[(f64, f64)], expected: &[(f64, f64)]) {
+    fn assert_almost_equal(actual: &[Item], expected: &[Item]) {
         assert_eq!(actual.len(), expected.len());
         for (a, b) in actual.iter().zip(expected) {
             assert!((a.0 - b.0).abs() < 0.01);
@@ -220,16 +278,16 @@ mod tests {
     }
 
     #[test]
-    fn histogram_simple() {
+    fn build_simple() {
         let (data, index) = build_data_and_index(/*columns*/ 1, /*rows*/ 64);
-        let hist = Histogram::build(&data, &[0], &index, true, /*parallel*/ false);
+        let hist = Histogram::build(&data, None, &index, true, /*parallel*/ false);
         assert_almost_equal(hist.get(0), &[(-3.2, 32.), (-3.2, 32.), (0., 0.)]);
     }
 
     #[test]
-    fn histogram_parallel() {
+    fn build_parallel() {
         let (data, index) = build_data_and_index(/*columns*/ 2, /*rows*/ 20);
-        let hist = Histogram::build(&data, &[0, 1], &index, true, /*parallel*/ true);
+        let hist = Histogram::build(&data, None, &index, true, /*parallel*/ true);
         assert_almost_equal(hist.get(0), &[(-1., 10.), (-1., 10.), (0., 0.)]);
         assert_eq!(hist.get(1), hist.get(0));
     }
@@ -237,7 +295,7 @@ mod tests {
     #[test]
     fn parallel_split() {
         let (data, index) = build_data_and_index(/*columns*/ 3, /*rows*/ 100_000);
-        let hist = Histogram::build(&data, &[0, 1, 2], &index, true, /*parallel*/ true);
+        let hist = Histogram::build(&data, None, &index, true, /*parallel*/ true);
         assert_almost_equal(hist.get(2), &[(-5e3, 5e4), (-5e3, 5e4), (0., 0.)]);
     }
 
@@ -246,7 +304,7 @@ mod tests {
         let (data, mut index) = build_data_and_index(/*columns*/ 1, /*rows*/ 64);
         let mut rng = StdRng::seed_from_u64(0);
         index.shuffle(&mut rng);
-        let hist = Histogram::build(&data, &[0], &index, /*initial*/ false, false);
+        let hist = Histogram::build(&data, None, &index, /*initial*/ false, false);
         assert_almost_equal(hist.get(0), &[(-3.2, 32.), (-3.2, 32.), (0., 0.)]);
     }
 
@@ -254,16 +312,53 @@ mod tests {
     fn partial_build() {
         let (data, mut index) = build_data_and_index(/*columns*/ 10, /*rows*/ 10);
         index.truncate(5);
-        let hist = Histogram::build(&data, &[0], &index, false, true);
+        let hist = Histogram::build(&data, Some(&HashSet::from([0])), &index, false, true);
         assert_almost_equal(hist.get(0), &[(-0.3, 3.), (-0.2, 2.), (0., 0.)]);
         assert_eq!(hist.get(1), &[]);
-        assert_eq!(hist.data.len(), 3);
     }
 
     #[test]
-    fn histogram_operations() {
+    fn columns_iterator() {
+        let (data, index) = build_data_and_index(/*columns*/ 4, /*rows*/ 1000);
+        let mut hist = Histogram::build(&data, Some(&HashSet::from([0, 2])), &index, true, false);
+        let columns = hist.iter().collect::<Vec<_>>();
+        assert_eq!(columns, vec![0, 2]);
+
+        hist.compress(&HashSet::new());
+        assert!(hist.iter().next().is_none());
+    }
+
+    #[test]
+    fn compress() {
+        let (data, index) = build_data_and_index(/*columns*/ 5, /*rows*/ 10);
+        let hist = Histogram::build(&data, None, &index, true, false);
+        assert_eq!(hist.splits, vec![0, 3, 6, 9, 12, 15]);
+
+        // Keep two columns.
+        let mut compact = hist.clone();
+        compact.compress(&HashSet::from([1, 3]));
+        assert_eq!(compact.data.len(), 6);
+        assert_eq!(compact.splits, &[0, 0, 3, 3, 6, 6]);
+        assert_eq!(compact.get(0), &[]);
+        assert_eq!(compact.get(1), hist.get(1));
+
+        // Keep one column.
+        compact.compress(&HashSet::from([1]));
+        assert_eq!(compact.data.len(), 3);
+        assert_eq!(compact.splits, &[0, 0, 3, 3, 3, 3]);
+        assert_eq!(compact.get(1), hist.get(1));
+        assert_eq!(compact.get(3), &[]);
+
+        // Keep zero columns.
+        compact.compress(&HashSet::new());
+        assert!(compact.data.is_empty());
+        assert_eq!(compact.splits, vec![0; 6]);
+    }
+
+    #[test]
+    fn operations() {
         let (data, index) = build_data_and_index(/*columns*/ 2, /*rows*/ 10);
-        let hist = Histogram::build(&data, &[0, 1], &index, false, false);
+        let hist = Histogram::build(&data, None, &index, true, false);
 
         let mut hist1 = hist.clone();
         hist1 += &hist.data;

@@ -16,6 +16,7 @@ use crate::dataset::{Dataset, Feature, FeatureType, IndexT, Objective, RowIndex}
 use crate::histogram::Histogram;
 use itertools::{Itertools, partition};
 use rayon::prelude::*;
+use std::collections::HashSet;
 
 /// Options controlling how a node is split.
 #[derive(Clone, Debug)]
@@ -53,8 +54,6 @@ pub struct Splittable<'a, I: IndexT, O: Objective> {
     pub histogram: Histogram,
     /// The node's aggregate statistics (including its own gain term).
     pub stats: SplitStats,
-    /// Feature index for selecting candidates.
-    pub columns: Vec<usize>,
 }
 
 /// A candidate split of one feature: its bin, whether it folds missing rows
@@ -218,7 +217,7 @@ pub fn find_all_splits<I: IndexT, O: Objective>(
         let tasks = splittables
             .iter()
             .enumerate()
-            .flat_map(|(idx, item)| item.columns.iter().map(move |&col| (idx, col)))
+            .flat_map(|(idx, item)| item.histogram.iter().map(move |col| (idx, col)))
             .collect::<Vec<_>>();
 
         // Score each pair independently (no shared state), keeping only
@@ -248,9 +247,9 @@ pub fn find_all_splits<I: IndexT, O: Objective>(
         // Sequential equivalent: same per-splittable best-gain candidate,
         // kept in input order (a splittable with no candidate maps to `None`).
         let find_best_split = |item: &Splittable<I, O>| {
-            item.columns
+            item.histogram
                 .iter()
-                .filter_map(|&col| {
+                .filter_map(|col| {
                     let (hist, feat) = (item.histogram.get(col), &features[col]);
                     let mut res = find_split(hist, &item.stats, options, feat.type_)?;
                     res.feature_id = col;
@@ -294,14 +293,16 @@ impl<'a, I: IndexT, O: Objective> Splittable<'a, I, O> {
         // On a non-final split, keep the larger side's existing histogram and
         // rebuild the smaller side from scratch, subtracting it to recover
         // the other side's histogram - cheaper than building both.
+        let columns = || self.histogram.iter().collect::<HashSet<_>>();
+
         let (hist_left, hist_right) = if final_split {
-            (Histogram::new(&[], &[]), Histogram::new(&[], &[]))
+            (Histogram::new(&[], None), Histogram::new(&[], None))
         } else if index_left.len() < index_right.len() {
-            let hist = Histogram::build(data, &self.columns, index_left, false, parallel);
+            let hist = Histogram::build(data, Some(&columns()), index_left, false, parallel);
             self.histogram -= &hist.data;
             (hist, self.histogram)
         } else {
-            let hist = Histogram::build(data, &self.columns, index_right, false, parallel);
+            let hist = Histogram::build(data, Some(&columns()), index_right, false, parallel);
             self.histogram -= &hist.data;
             (self.histogram, hist)
         };
@@ -310,13 +311,11 @@ impl<'a, I: IndexT, O: Objective> Splittable<'a, I, O> {
             index: index_left,
             histogram: hist_left,
             stats: split.positive,
-            columns: self.columns.clone(),
         };
         let right = Self {
             index: index_right,
             histogram: hist_right,
             stats: split.negative,
-            columns: self.columns,
         };
         (left, right)
     }
@@ -399,6 +398,7 @@ mod tests {
     use super::*;
     use crate::dataset::SquaredLoss;
 
+    // Build test histogram: 3 columns, 5 rows, 3+1 bins.
     fn build_splittable() -> Splittable<'static, u32, SquaredLoss> {
         let (v0, v1, v2, v3) = ((0., 0.), (0.25, 1.), (0.5, 2.), (0.75, 3.));
         let histogram = Histogram {
@@ -414,10 +414,10 @@ mod tests {
             index: &mut [],
             histogram,
             stats,
-            columns: vec![0, 1, 2],
         }
     }
 
+    // Find best split helper.
     fn test_find_split(
         splittable: Splittable<'_, u32, SquaredLoss>,
         features: &[Feature],
@@ -531,6 +531,24 @@ mod tests {
     }
 
     #[test]
+    fn search_partial() {
+        let features = vec![Feature::default(); 3];
+        let mut splittable = build_splittable();
+        splittable.histogram.compress(&HashSet::from([0, 1]));
+        assert_eq!(
+            test_find_split(splittable, &features, &BoostNodeOptions::default()),
+            Some(SplitCandidate {
+                feature_id: 1,
+                bin_id: 1,
+                with_missing: false,
+                positive: SplitStats::new(0.25, 1.0, 0.0625),
+                negative: SplitStats::new(1.0, 4.0, 0.25),
+                gain: 0.3125,
+            })
+        );
+    }
+
+    #[test]
     fn search_parallel() {
         let features = vec![Feature::default(); 3];
         let result = find_all_splits(
@@ -586,7 +604,7 @@ mod tests {
     }
 
     #[test]
-    fn split() {
+    fn split_node() {
         let data = Dataset::<u16>::new(
             vec![Feature::linear("".into(), vec![1., 2., 3.]); 3],
             vec![
