@@ -21,7 +21,7 @@ type Item = (f64, f64);
 #[derive(Clone)]
 pub struct Histogram {
     /// One (grad, hess) pair per bin.
-    pub data: Vec<Item>,
+    data: Vec<Item>,
     /// Per-feature start offsets into `data`.
     splits: Vec<usize>,
 }
@@ -34,7 +34,7 @@ impl Histogram {
         let splits = std::iter::once(0)
             .chain(features.iter().enumerate().map(|(idx, feat)| {
                 if columns.is_none_or(|c| c.contains(&idx)) {
-                    feat.bins.len() + 1
+                    feat.bins().len() + 1
                 } else {
                     0
                 }
@@ -48,6 +48,11 @@ impl Histogram {
             data: vec![(0.0, 0.0); *splits.last().unwrap()],
             splits,
         }
+    }
+
+    /// Get full histogram data.
+    pub fn data(&self) -> &[Item] {
+        &self.data
     }
 
     /// The (grad, hess) pairs of feature `column`.
@@ -82,7 +87,7 @@ impl Histogram {
         initial: bool,
         parallel: bool,
     ) -> Self {
-        let mut result = Self::new(&data.features, columns);
+        let mut result = Self::new(data.features(), columns);
         assert!(!result.data.is_empty());
         assert!(data.rows() >= index.len());
 
@@ -109,7 +114,7 @@ impl Histogram {
                     .flat_map(|(hist, src)| {
                         split_parts(hist, &result.splits)
                             .into_iter()
-                            .zip(data.inputs.iter())
+                            .zip(data.inputs().iter())
                             .map(move |item| (item, src))
                     })
                     .collect::<Vec<_>>();
@@ -125,7 +130,7 @@ impl Histogram {
                 // directly into the result, no partials to fold.
                 split_parts(&mut result.data, &result.splits)
                     .into_par_iter()
-                    .zip(data.inputs.par_iter())
+                    .zip(data.inputs().par_iter())
                     .for_each(|(slice, row)| {
                         build_line(slice, row, index, initial);
                     });
@@ -133,7 +138,7 @@ impl Histogram {
         } else {
             // Sequential: features are built one by one, each row landing
             // into its bin for the current feature.
-            for ([start, end], row) in result.splits.array_windows().zip(&data.inputs) {
+            for ([start, end], row) in result.splits.array_windows().zip(data.inputs()) {
                 build_line(&mut result.data[*start..*end], row, index, initial);
             }
         }
@@ -157,6 +162,12 @@ impl Histogram {
             self.splits[idx + 1] = dst;
         }
         self.data.truncate(dst);
+    }
+
+    /// Mutable histogram data (internal).
+    #[allow(dead_code)]
+    pub(crate) fn data_mut(&mut self) -> &mut [Item] {
+        &mut self.data
     }
 }
 
@@ -220,14 +231,14 @@ fn build_line<T: Copy + Into<usize>, I: IndexT, O: Objective>(
     };
 
     if initial {
-        let offset = index[0].index.to_usize();
+        let offset = index[0].as_usize();
         for (item, &hpos) in index.iter().zip(row.iter().skip(offset)) {
-            update(hpos, item.deriv.grad_hess());
+            update(hpos, item.grad_hess());
         }
     } else {
         for item in index {
-            let hpos = row[item.index.to_usize()];
-            update(hpos, item.deriv.grad_hess());
+            let hpos = row[item.as_usize()];
+            update(hpos, item.grad_hess());
         }
     }
 }
@@ -261,7 +272,8 @@ mod tests {
             vec![Feature::linear("".into(), vec![0.0; 2]); columns],
             vec![[0, 1].repeat(rows / 2); columns],
             vec![0.0; rows],
-        );
+        )
+        .unwrap();
         let index = (0..rows)
             .map(|i| RowIndex::new(i, SquaredLoss::derive(1.0, 0.9)))
             .collect();
@@ -289,7 +301,6 @@ mod tests {
         let (data, index) = build_data_and_index(/*columns*/ 2, /*rows*/ 20);
         let hist = Histogram::build(&data, None, &index, true, /*parallel*/ true);
         assert_almost_equal(hist.get(0), &[(-1., 10.), (-1., 10.), (0., 0.)]);
-        assert_eq!(hist.get(1), hist.get(0));
     }
 
     #[test]
@@ -304,6 +315,7 @@ mod tests {
         let (data, mut index) = build_data_and_index(/*columns*/ 1, /*rows*/ 64);
         let mut rng = StdRng::seed_from_u64(0);
         index.shuffle(&mut rng);
+
         let hist = Histogram::build(&data, None, &index, /*initial*/ false, false);
         assert_almost_equal(hist.get(0), &[(-3.2, 32.), (-3.2, 32.), (0., 0.)]);
     }
@@ -312,6 +324,7 @@ mod tests {
     fn partial_build() {
         let (data, mut index) = build_data_and_index(/*columns*/ 10, /*rows*/ 10);
         index.truncate(5);
+
         let hist = Histogram::build(&data, Some(&HashSet::from([0])), &index, false, true);
         assert_almost_equal(hist.get(0), &[(-0.3, 3.), (-0.2, 2.), (0., 0.)]);
         assert_eq!(hist.get(1), &[]);

@@ -23,6 +23,7 @@ fn create_dataset(rng: &mut StdRng) -> Dataset<u8> {
         (0..NUM_COLS).map(|_| new_row()).collect(),
         vec![0.0; NUM_ROWS],
     )
+    .unwrap()
 }
 
 fn create_tree(rng: &mut StdRng, depth: u32) -> Tree {
@@ -42,7 +43,7 @@ fn create_tree(rng: &mut StdRng, depth: u32) -> Tree {
     for idx in 0..(total / 2) {
         nodes.push(Node::default_leaf(idx as f32))
     }
-    Tree { nodes }
+    Tree::new(nodes).unwrap()
 }
 
 fn bench_main<T: IndexT>(c: &mut Criterion, prefix: &str) {

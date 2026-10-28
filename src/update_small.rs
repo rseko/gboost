@@ -26,8 +26,6 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
     tree: Option<&Tree>,
     parallel: bool,
 ) {
-    assert!(data.is_valid());
-    assert!(tree.is_none_or(|t| t.is_valid()));
     assert_eq!(predict.len(), data.rows());
     assert_eq!(index.len(), data.rows());
 
@@ -35,7 +33,7 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
         // Rows are partitioned into `TASK_SIZE` chunks processed concurrently;
         // each chunk gets its base offset so global row positions stay correct.
         const TASK_SIZE: usize = 1024;
-        let target_chunks = data.target.par_chunks(TASK_SIZE);
+        let target_chunks = data.target().par_chunks(TASK_SIZE);
         let predict_chunks = predict.par_chunks_mut(TASK_SIZE);
         let index_chunks = index.par_chunks_mut(TASK_SIZE);
 
@@ -45,15 +43,15 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
             .for_each(|(idx, (dst, (y, y_pred)))| {
                 let offset = idx * TASK_SIZE;
                 if let Some(tree) = tree {
-                    update_predict_slice(y_pred, tree, &data.inputs, offset);
+                    update_predict_slice(y_pred, tree, data.inputs(), offset);
                 }
                 update_index_slice::<I, O>(dst, y, y_pred, offset);
             });
     } else {
         if let Some(tree) = tree {
-            update_predict_slice(predict, tree, &data.inputs, 0);
+            update_predict_slice(predict, tree, data.inputs(), 0);
         }
-        update_index_slice::<I, O>(index, &data.target, predict, 0);
+        update_index_slice::<I, O>(index, data.target(), predict, 0);
     }
 }
 
@@ -102,12 +100,13 @@ mod tests {
             vec![vec![0; NUM_ROWS]],
             vec![1.0; NUM_ROWS],
         )
+        .unwrap()
     }
 
     /// A degenerate tree that predicts a constant 0.1 per row.
     fn build_tree() -> Tree {
         let root = Node::default_leaf(0.1);
-        Tree { nodes: vec![root] }
+        Tree::new(vec![root]).unwrap()
     }
 
     #[test]
@@ -125,8 +124,8 @@ mod tests {
 
         assert!(predict.iter().all(|x| *x == 0.5));
         index.iter().enumerate().for_each(|(k, v)| {
-            assert_eq!(v.index.to_usize(), k);
-            assert_eq!(v.deriv.grad_hess(), (-0.5, 1.0));
+            assert_eq!(v.as_usize(), k);
+            assert_eq!(v.grad_hess(), (-0.5, 1.0));
         });
     }
 
@@ -145,8 +144,8 @@ mod tests {
 
         assert!(predict.iter().all(|x| *x == 0.5));
         index.iter().enumerate().for_each(|(k, v)| {
-            assert_eq!(v.index.to_usize(), k);
-            assert_eq!(v.deriv.grad_hess(), (-0.37754065, 0.23500371));
+            assert_eq!(v.as_usize(), k);
+            assert_eq!(v.grad_hess(), (-0.37754065, 0.23500371));
         });
     }
 }
