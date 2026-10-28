@@ -137,7 +137,18 @@ impl<T> Dataset<T> {
         &self.target
     }
 
-    /// Get mutable inputs reference (internal).
+    /// Get inputs as mutable slices.
+    pub fn slices_mut(&mut self) -> Vec<&mut [T]> {
+        self.inputs.iter_mut().map(|x| x.as_mut_slice()).collect()
+    }
+
+    /// Get target as mutable slice.
+    pub fn target_mut(&mut self) -> &mut [f32] {
+        &mut self.target
+    }
+
+    /// Get inputs as mutable reference.
+    #[allow(unused)]
     pub(crate) fn inputs_mut(&mut self) -> &mut [Vec<T>] {
         &mut self.inputs
     }
@@ -276,6 +287,18 @@ fn sigmoid(y: f32) -> f32 {
     1.0 / (1.0 + (-y).exp())
 }
 
+/// Build an empty dataset (used in tests).
+#[allow(unused)]
+pub(crate) fn create_test_dataset(columns: usize, rows: usize, bins: usize) -> Dataset<u16> {
+    let bins = (0..bins).map(|i| i as f32).collect::<Vec<_>>();
+    Dataset::<u16>::new(
+        vec![Feature::linear("".into(), bins); columns],
+        vec![vec![0; rows]; columns],
+        vec![0.0; rows],
+    )
+    .unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,7 +311,9 @@ mod tests {
         assert_eq!(feature.bins(), &[1., 2.]);
 
         let feature = Feature::onehot("other".into(), vec![]);
+        assert_eq!(feature.name(), "other");
         assert_eq!(feature.kind(), FeatureKind::OneHot);
+        assert_eq!(feature.bins(), &[]);
     }
 
     #[test]
@@ -298,14 +323,14 @@ mod tests {
             Feature::onehot("b".into(), vec![]),
         ];
         let empty = Dataset::<u8>::new(features.clone(), vec![vec![]; 2], vec![]).unwrap();
+        assert_eq!(empty.columns(), 2);
         assert_eq!(empty.rows(), 0);
-        assert_eq!(empty.features().len(), 2);
 
         // Small dataset (`u8` bins).
         let input = vec![vec![0, 1, 2], vec![3, 4, 5]];
         let data = Dataset::<u8>::new(features.clone(), input, vec![1.0; 3]).unwrap();
-        assert_eq!(data.rows(), 3);
         assert_eq!(data.columns(), 2);
+        assert_eq!(data.rows(), 3);
 
         assert_eq!(data.features()[0].name(), "a");
         assert_eq!(data.inputs()[0], &[0, 1, 2]);
@@ -313,10 +338,13 @@ mod tests {
 
         // Large dataset (`u16` bins, target offloaded).
         let input = vec![vec![0; 1000]; 2];
-        let data = Dataset::<u16>::new(features, input, vec![]).unwrap();
-        assert_eq!(data.rows(), 1000);
+        let mut data = Dataset::<u16>::new(features, input, vec![]).unwrap();
         assert_eq!(data.columns(), 2);
+        assert_eq!(data.rows(), 1000);
 
+        data.slices_mut()[0][0] = 6;
+        assert_eq!(data.inputs()[0][0], 6);
+        assert_eq!(data.target_mut(), &mut []);
         assert_eq!(format!("{data:?}"), "dataset with 2 columns and 1000 rows");
     }
 
@@ -360,6 +388,7 @@ mod tests {
         }
 
         let other = RowIndex::<u64, LogLoss>::new_array(1);
+        assert_eq!(other[0].as_usize(), 0);
         assert_eq!(other[0].grad_hess(), (0.5, 0.25));
     }
 

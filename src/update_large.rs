@@ -75,7 +75,7 @@ where
 
     // The sampled rows per batch must scale with the dataset size, so the
     // in-memory `data(inputs)` view and the on-disk layout stay consistent.
-    assert!(config.bits_per_batch > 0 && config.bits_per_batch <= BATCH);
+    assert_eq!(config.bits_per_batch.clamp(1, BATCH), config.bits_per_batch);
     assert_eq!(
         config.total_rows / BATCH,
         data.rows() / config.bits_per_batch
@@ -99,7 +99,7 @@ where
     for _ in 0..batch_count {
         input_slices.push(vec![]);
     }
-    for items in data.inputs_mut().iter_mut() {
+    for items in data.slices_mut() {
         for (src, dst) in items
             .chunks_mut(config.bits_per_batch)
             .zip(input_slices.iter_mut())
@@ -528,7 +528,7 @@ mod tests {
         // Truncate the dataset.
         let sampled_rows = NUM_ROWS * NUM_SAMPLES / BATCH;
         let mut index = RowIndex::<u32, SquaredLoss>::new_array(sampled_rows);
-        for row in data.inputs_mut().iter_mut() {
+        for row in data.inputs_mut() {
             row.truncate(sampled_rows);
         }
 
@@ -590,9 +590,47 @@ mod tests {
         assert_eq!(predict.iter().sum::<f32>(), 49970.5);
     }
 
-    /// Popcount of the mask, summed across its `u64` words.
-    fn mask_popcount(mask: &[u64]) -> u64 {
-        mask.iter().map(|w| w.count_ones() as u64).sum()
+    #[test]
+    fn missing_files() {
+        // Verify that the update fails if the files are missing.
+        let mut data = build_data();
+        let mut index = RowIndex::<u32, SquaredLoss>::new_array(NUM_ROWS);
+        let mut rng = StdRng::seed_from_u64(TEST_SEED);
+        let temp_dir = tempfile::TempDir::new().unwrap();
+
+        let config = UpdateConfig {
+            train_step: 0,
+            total_rows: NUM_ROWS,
+            initial: 0.5,
+            bits_per_batch: BATCH,
+        };
+        assert!(
+            update_large(
+                &mut data,
+                &mut index,
+                None,
+                temp_dir.path(),
+                &config,
+                &mut rng,
+                /*parallel*/ true
+            )
+            .is_err()
+        );
+
+        // Create the files and re-try (no tree).
+        write_dataset(temp_dir.path(), &data);
+        assert!(
+            update_large(
+                &mut data,
+                &mut index,
+                None,
+                temp_dir.path(),
+                &config,
+                &mut rng,
+                /*parallel*/ true
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -609,6 +647,11 @@ mod tests {
             (BATCH, BATCH - 1), // branch B, near BATCH, non-multiple of 64
             (BATCH, BATCH),     // branch B, full BATCH, all selected
         ];
+
+        /// Popcount of the mask, summed across its `u64` words.
+        fn mask_popcount(mask: &[u64]) -> u64 {
+            mask.iter().map(|w| w.count_ones() as u64).sum()
+        }
 
         for &(total, bits) in cases {
             let mut rng = StdRng::seed_from_u64(TEST_SEED);
