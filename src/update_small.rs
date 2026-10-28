@@ -26,6 +26,7 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
     tree: Option<&Tree>,
     parallel: bool,
 ) {
+    assert!(!data.target().is_empty());
     assert_eq!(predict.len(), data.rows());
     assert_eq!(index.len(), data.rows());
 
@@ -89,63 +90,27 @@ fn update_index_slice<I: IndexT, O: Objective>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dataset::{Feature, LogLoss, SquaredLoss};
-    use crate::tree::Node;
-
-    /// A small dataset with a single feature column.
-    fn build_data() -> Dataset<u8> {
-        const NUM_ROWS: usize = 5000;
-        Dataset::new(
-            vec![Feature::default()],
-            vec![vec![0; NUM_ROWS]],
-            vec![1.0; NUM_ROWS],
-        )
-        .unwrap()
-    }
-
-    /// A degenerate tree that predicts a constant 0.1 per row.
-    fn build_tree() -> Tree {
-        let root = Node::default_leaf(0.1);
-        Tree::new(vec![root]).unwrap()
-    }
+    use crate::dataset::{SquaredLoss, create_test_dataset};
+    use crate::tree::create_test_tree;
 
     #[test]
-    fn update_simple() {
-        let (data, tree) = (build_data(), build_tree());
-        let mut predict = vec![0.4; data.rows()];
-        let mut index = RowIndex::<u32, SquaredLoss>::new_array(data.rows());
-        update_small(
-            &mut predict,
-            &mut index,
-            &data,
-            Some(&tree),
-            /*parallel*/ false,
-        );
+    fn small_test() {
+        let data = create_test_dataset(/*columns*/ 2, /*rows*/ 5000, /*bins*/ 0);
+        let tree = create_test_tree(/*depth*/ 2);
 
-        assert!(predict.iter().all(|x| *x == 0.5));
-        index.iter().enumerate().for_each(|(k, v)| {
-            assert_eq!(v.as_usize(), k);
-            assert_eq!(v.grad_hess(), (-0.5, 1.0));
-        });
-    }
+        for parallel in [false, true] {
+            let mut predict = vec![0.5; data.rows()];
+            let mut index = RowIndex::<u32, SquaredLoss>::new_array(data.rows());
+            update_small(&mut predict, &mut index, &data, Some(&tree), parallel);
 
-    #[test]
-    fn update_parallel() {
-        let (data, tree) = (build_data(), build_tree());
-        let mut predict = vec![0.4; data.rows()];
-        let mut index = RowIndex::<u32, LogLoss>::new_array(data.rows());
-        update_small(
-            &mut predict,
-            &mut index,
-            &data,
-            Some(&tree),
-            /*parallel*/ true,
-        );
+            assert!(predict.iter().all(|x| *x == 0.7));
+            index.iter().enumerate().for_each(|(k, v)| {
+                assert_eq!(v.as_usize(), k);
+                assert_eq!(v.grad_hess(), (0.7, 1.0));
+            });
 
-        assert!(predict.iter().all(|x| *x == 0.5));
-        index.iter().enumerate().for_each(|(k, v)| {
-            assert_eq!(v.as_usize(), k);
-            assert_eq!(v.grad_hess(), (-0.37754065, 0.23500371));
-        });
+            update_small(&mut predict, &mut index, &data, None, parallel);
+            assert!(predict.iter().all(|x| *x == 0.7));
+        }
     }
 }

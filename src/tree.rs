@@ -1,24 +1,33 @@
 //! A single decision tree produced by gradient boosting.
 //!
-//! A tree is a flat, ordered list of `Node`s (node 0 is the root), where each
-//! node is either a `Split` on one feature bin or a `Leaf` holding a value.
+//! A tree is a flat, index-addressed list of `Node`s, where each node is either
+//! a `Split` on one feature bin or a `Leaf` holding a value.
 //! Rows are routed from the root to a leaf via [`Tree::find_leaf`].
 //!
 //! Structures:
-//! - `Tree`: the flat list of nodes; node 0 is the root.
+//! - `Tree`: the flat list of nodes.
 //! - `Node`: a split or leaf, its depth, and its coverage.
 //! - `NodeKind`: `Split(NodeSplit)` or `Leaf(f32)`.
 //! - `NodeSplit`: one split condition on a feature bin plus children and gain.
 
-use crate::dataset::Feature;
+use crate::dataset::{Feature, FeatureKind};
 use anyhow::{Result, bail};
 use std::collections::HashSet;
 
-/// A decision tree: a flat, ordered list of [`Node`]s, with node 0 as root.
+/// A decision tree: a flat, index-addressed list of [`Node`]s.
 #[derive(Clone, Debug)]
 pub struct Tree {
-    /// All nodes, parent before children (preorder).
+    /// All nodes. Node 0 is the root; every other node is reached from it
+    /// through `NodeSplit` child links. Order in the vector is not constrained.
     nodes: Vec<Node>,
+}
+
+/// Depth-first iterator over a [`Tree`]'s node indices, starting at the root.
+pub struct TreeIter<'a> {
+    /// Nodes of the tree being iterated.
+    nodes: &'a [Node],
+    /// Pending child indices, most recent last (LIFO).
+    stack: Vec<usize>,
 }
 
 /// A tree node: either an internal split or a leaf value.
@@ -81,6 +90,14 @@ impl Tree {
         &self.nodes[index]
     }
 
+    /// Get an iterator over the node indices (DFS).
+    pub fn iter(&self) -> TreeIter<'_> {
+        TreeIter {
+            nodes: &self.nodes,
+            stack: vec![0],
+        }
+    }
+
     /// Route one row from the root to its leaf.
     ///
     /// `get_bin` resolves the row's bin for a feature column: `get_bin(feature_id)`
@@ -109,16 +126,12 @@ impl Tree {
     /// boundary value when `features` is provided), children, gain and cover;
     /// leaves show their value and cover.
     pub fn to_string(&self, features: Option<&[Feature]>) -> String {
-        let mut stack = Vec::from([0]);
         let mut result = Vec::<String>::new();
-        while let Some(idx) = stack.pop() {
+        for idx in self.iter() {
             let node = &self.nodes[idx];
             let indent = "    ".repeat(node.depth as usize);
             result.push(match &node.kind {
                 NodeKind::Split(split) => {
-                    // Push negative first so the positive child prints first.
-                    stack.push(split.negative_id);
-                    stack.push(split.positive_id);
                     format!(
                         "{}{}:[{}] yes={},no={},gain={},cover={}",
                         indent,
@@ -141,18 +154,24 @@ impl Tree {
     /// Verify that the tree is valid (not empty, in-bound indices, no loops).
     fn is_valid(&self) -> bool {
         let mut visited = HashSet::new();
-        let mut stack = Vec::from([0]);
-        while let Some(idx) = stack.pop() {
-            if !visited.insert(idx) || idx >= self.nodes.len() {
-                return false;
-            }
-            if let NodeKind::Split(split) = &self.nodes[idx].kind {
-                for next_id in [split.positive_id, split.negative_id] {
-                    stack.push(next_id);
-                }
-            }
+        let mut iter = self.iter();
+        iter.all(|i| visited.insert(i))
+            && iter.stack.is_empty()
+            && visited.len() == self.nodes.len()
+    }
+}
+
+impl<'a> Iterator for TreeIter<'a> {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let index = self.stack.pop()?;
+        // Push negative first so the positive branch is visited first.
+        if let NodeKind::Split(split) = &self.nodes.get(index)?.kind {
+            self.stack.push(split.negative_id);
+            self.stack.push(split.positive_id);
         }
-        visited.len() == self.nodes.len()
+        Some(index)
     }
 }
 
@@ -207,17 +226,18 @@ impl NodeSplit {
     /// otherwise falls back to the raw feature/bin ids.
     pub fn to_string(&self, feature: Option<&Feature>) -> String {
         if self.bin_id != 0 {
-            let pred = if self.is_range { "<=" } else { "==" };
+            let is_valid = |f: &Feature| (f.kind() == FeatureKind::Linear) == self.is_range;
+            let pred = if feature.is_none_or(is_valid) {
+                if self.is_range { "<=" } else { "==" }
+            } else {
+                "??"
+            };
             let null = if self.with_missing { " | null" } else { "" };
             match feature {
                 Some(info) => format!(
                     "{} {pred} {}{null}",
                     info.name(),
-                    if self.bin_id <= info.bins().len() {
-                        info.bins()[self.bin_id - 1]
-                    } else {
-                        f32::NAN
-                    }
+                    info.bins().get(self.bin_id - 1).unwrap_or(&f32::NAN),
                 ),
                 None => format!("{} {pred} {}{null}", self.feature_id, self.bin_id),
             }
@@ -234,33 +254,46 @@ impl std::fmt::Display for Tree {
     }
 }
 
+/// Build a balanced tree (used in tests).
+#[allow(unused)]
+pub(crate) fn create_test_tree(depth: usize) -> Tree {
+    let mut nodes = vec![];
+    let leaves = (1 << depth) / 2;
+    for idx in 1..leaves {
+        nodes.push(Node::default_split(NodeSplit {
+            feature_id: idx - 1,
+            bin_id: idx,
+            is_range: true,
+            with_missing: false,
+            positive_id: idx * 2 - 1,
+            negative_id: idx * 2,
+            gain: 0.1 * idx as f32,
+        }));
+    }
+    for idx in 1..=leaves {
+        nodes.push(Node::default_leaf(0.1 * idx as f32))
+    }
+    Tree::new(nodes).unwrap()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A small two-level tree: one split at the root with two leaf children.
-    fn build_tree(is_range: bool, with_missing: bool) -> Tree {
-        let root = Node::default_split(NodeSplit {
-            feature_id: 0,
-            bin_id: 2,
-            is_range,
-            with_missing,
-            positive_id: 1,
-            negative_id: 2,
-            gain: 9.9,
-        });
-        let left = Node::default_leaf(1.0);
-        let right = Node::default_leaf(2.0);
-        Tree::new(vec![root, left, right]).unwrap()
+    fn update_root<F: Fn(&mut NodeSplit)>(tree: &mut Tree, func: F) {
+        match &mut tree.nodes[0].kind {
+            NodeKind::Split(split) => func(split),
+            NodeKind::Leaf(_) => unreachable!("root is a split"),
+        }
     }
 
     #[test]
     fn create_tree() {
-        let tree = build_tree(false, false);
+        let tree = create_test_tree(/*depth*/ 3);
         assert!(tree.get(0).get_value().is_nan());
 
-        let single_node_tree = Tree::new(vec![Node::default_leaf(0.0)]).unwrap();
-        assert_eq!(single_node_tree.get(0).get_value(), 0.0);
+        let tree = create_test_tree(/*depth*/ 1);
+        assert_eq!(tree.get(0).get_value(), 0.1);
     }
 
     #[test]
@@ -292,46 +325,59 @@ mod tests {
 
     #[test]
     fn search_onehot() {
-        let tree = build_tree(/*is_range*/ false, /*with_missing*/ true);
-        assert_eq!(tree.find_leaf(|_| 0).get_value(), 1.);
-        assert_eq!(tree.find_leaf(|_| 1).get_value(), 2.);
-        assert_eq!(tree.find_leaf(|_| 2).get_value(), 1.);
-        assert_eq!(tree.find_leaf(|_| 3).get_value(), 2.);
+        let mut tree = create_test_tree(/*depth*/ 2);
+        update_root(&mut tree, |split| {
+            split.is_range = false;
+            split.with_missing = true;
+        });
+        assert_eq!(tree.find_leaf(|_| 0).get_value(), 0.1);
+        assert_eq!(tree.find_leaf(|_| 1).get_value(), 0.1);
+        assert_eq!(tree.find_leaf(|_| 2).get_value(), 0.2);
+        assert_eq!(tree.find_leaf(|_| 3).get_value(), 0.2);
     }
 
     #[test]
     fn search_linear() {
-        let tree = build_tree(/*is_range*/ true, /*with_missing*/ false);
-        assert_eq!(tree.find_leaf(|_| 0).get_value(), 2.);
-        assert_eq!(tree.find_leaf(|_| 1).get_value(), 1.);
-        assert_eq!(tree.find_leaf(|_| 2).get_value(), 1.);
-        assert_eq!(tree.find_leaf(|_| 3).get_value(), 2.);
+        let tree = create_test_tree(/*depth*/ 2);
+        assert_eq!(tree.find_leaf(|_| 0).get_value(), 0.2);
+        assert_eq!(tree.find_leaf(|_| 1).get_value(), 0.1);
+        assert_eq!(tree.find_leaf(|_| 2).get_value(), 0.2);
+        assert_eq!(tree.find_leaf(|_| 3).get_value(), 0.2);
     }
 
     #[test]
     fn tree_format() {
-        let mut tree = build_tree(/*is_range*/ true, /*with_missing*/ true);
+        let mut tree = create_test_tree(/*depth*/ 2);
+        update_root(&mut tree, |split| {
+            split.is_range = false;
+            split.with_missing = true;
+        });
         assert_eq!(
             tree.to_string(None),
-            "0:[0 <= 2 | null] yes=1,no=2,gain=9.9,cover=0\n    \
-                1:value=1,cover=0\n    \
-                2:value=2,cover=0"
+            "0:[0 == 1 | null] yes=1,no=2,gain=0.1,cover=0\n    \
+                1:value=0.1,cover=0\n    \
+                2:value=0.2,cover=0"
         );
-        if let NodeKind::Split(split) = &mut tree.nodes[0].kind {
+
+        update_root(&mut tree, |split| {
             split.bin_id = 0;
-        }
+        });
         assert!(format!("{tree}").starts_with("0:[is null]"));
     }
 
     #[test]
     fn tree_format_with_context() {
-        let tree = build_tree(/*is_range*/ false, /*with_missing*/ false);
-        let feature = Feature::onehot("name".into(), vec![2.0, 4.0]);
+        let tree = create_test_tree(/*depth*/ 2);
+        let feature = Feature::linear("name".into(), vec![3.0, 4.0]);
         assert_eq!(
             tree.to_string(Some(&[feature])),
-            "0:[name == 4] yes=1,no=2,gain=9.9,cover=0\n    \
-                1:value=1,cover=0\n    \
-                2:value=2,cover=0"
+            "0:[name <= 3] yes=1,no=2,gain=0.1,cover=0\n    \
+                1:value=0.1,cover=0\n    \
+                2:value=0.2,cover=0"
         );
+
+        let feature = Feature::onehot("name".into(), vec![]);
+        let invalid = tree.to_string(Some(&[feature]));
+        assert!(invalid.starts_with("0:[name ?? NaN]"));
     }
 }
