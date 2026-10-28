@@ -2,8 +2,8 @@
 //! per-row loss derivatives, and the objective functions they are driven by.
 //!
 //! Structures:
-//! - `FeatureType`: how a bin is matched (exact or at-or-below threshold).
-//! - `Feature`: one column's name, type, and bin boundaries.
+//! - `FeatureKind`: how a bin is matched (exact or at-or-below threshold).
+//! - `Feature`: one column's name, kind, and bin boundaries.
 //! - `Dataset`: the feature matrix and target values.
 //! - `RowIndex`: one row's index plus its gradient and hessian.
 //! - `IndexT`: integer index trait (convertible to and from `usize`).
@@ -11,45 +11,62 @@
 //! - `SquaredLoss`: regression objective (squared error).
 //! - `LogLoss`: classification objective (binary cross-entropy).
 
-/// Feature type defines how values are matched.
+use anyhow::{Result, bail};
+
+/// Feature kind defines how values are matched.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum FeatureType {
+pub enum FeatureKind {
     /// Match exactly one bin (`==`).
     OneHot,
     /// Match the bin and any bin below it (`<=`).
     Linear,
 }
 
-/// Feature descriptor defines the name, type and original domain thresholds.
+/// Feature descriptor defines the name, kind and original domain thresholds.
 #[derive(Clone, Debug)]
 pub struct Feature {
     /// Original column name from the source data.
-    pub name: String,
-    /// Type defines how values are matched.
-    pub type_: FeatureType,
+    name: String,
+    /// Kind defines how values are matched.
+    kind: FeatureKind,
     /// The bin boundaries split the original domain into `bins.len()` ranges.
     /// The last bin contains the maximum known value, but is treated as infinity.
     /// Values [1, 2, 3] define ranges (-inf, 1]; (1, 2]; (2, inf).
-    pub bins: Vec<f32>,
+    bins: Vec<f32>,
 }
 
 impl Feature {
-    /// Build a feature with `FeatureType::OneHot`.
+    /// Build a feature with `FeatureKind::OneHot`.
     pub fn onehot(name: String, bins: Vec<f32>) -> Self {
         Self {
-            type_: FeatureType::OneHot,
+            kind: FeatureKind::OneHot,
             name,
             bins,
         }
     }
 
-    /// Build a feature with `FeatureType::Linear`.
+    /// Build a feature with `FeatureKind::Linear`.
     pub fn linear(name: String, bins: Vec<f32>) -> Self {
         Self {
-            type_: FeatureType::Linear,
+            kind: FeatureKind::Linear,
             name,
             bins,
         }
+    }
+
+    /// Get feature name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get feature kind.
+    pub fn kind(&self) -> FeatureKind {
+        self.kind
+    }
+
+    /// Get bin boundaries.
+    pub fn bins(&self) -> &[f32] {
+        &self.bins
     }
 }
 
@@ -64,21 +81,35 @@ impl Default for Feature {
 #[derive(Clone)]
 pub struct Dataset<T> {
     /// One descriptor per feature column.
-    pub features: Vec<Feature>,
+    features: Vec<Feature>,
     /// One inner vector per feature, one value per row.
-    pub inputs: Vec<Vec<T>>,
+    inputs: Vec<Vec<T>>,
     /// Per-row target value (classification label or regression value).
-    pub target: Vec<f32>,
+    target: Vec<f32>,
 }
 
 impl<T> Dataset<T> {
     /// Build a new dataset from its parts.
-    pub fn new(features: Vec<Feature>, inputs: Vec<Vec<T>>, target: Vec<f32>) -> Self {
-        Self {
+    pub fn new(features: Vec<Feature>, inputs: Vec<Vec<T>>, target: Vec<f32>) -> Result<Self> {
+        if features.is_empty() {
+            bail!("features are not set");
+        }
+        if features.len() != inputs.len() {
+            bail!("input columns do not match features");
+        }
+        let rows = inputs[0].len();
+        if inputs.iter().any(|col| col.len() != rows) {
+            bail!("input matrix is not dense");
+        }
+        if !target.is_empty() && target.len() != rows {
+            bail!("target size does not match inputs");
+        }
+
+        Ok(Self {
             features,
             inputs,
             target,
-        }
+        })
     }
 
     /// Number of columns in the dataset.
@@ -88,15 +119,38 @@ impl<T> Dataset<T> {
 
     /// Number of rows in the dataset.
     pub fn rows(&self) -> usize {
-        self.inputs.first().map_or(0, |x| x.len())
+        self.inputs.first().map(|x| x.len()).unwrap()
     }
 
-    /// Verify that the dataset is valid (sizes match).
-    pub fn is_valid(&self) -> bool {
-        self.columns() > 0
-            && self.features.len() == self.columns()
-            && self.inputs.iter().all(|col| col.len() == self.rows())
-            && (self.target.is_empty() || self.target.len() == self.rows())
+    /// Get features reference.
+    pub fn features(&self) -> &[Feature] {
+        &self.features
+    }
+
+    /// Get inputs reference.
+    pub fn inputs(&self) -> &[Vec<T>] {
+        &self.inputs
+    }
+
+    /// Get target data (if present).
+    pub fn target(&self) -> &[f32] {
+        &self.target
+    }
+
+    /// Get mutable inputs reference (internal).
+    pub(crate) fn inputs_mut(&mut self) -> &mut [Vec<T>] {
+        &mut self.inputs
+    }
+}
+
+impl<T> std::fmt::Debug for Dataset<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "dataset with {} columns and {} rows",
+            self.columns(),
+            self.rows(),
+        )
     }
 }
 
@@ -104,9 +158,9 @@ impl<T> Dataset<T> {
 #[derive(Clone, Copy)]
 pub struct RowIndex<I: IndexT, O: Objective> {
     /// Row position, dataset-wide or sampled-subset-relative.
-    pub index: I,
+    index: I,
     /// Stored gradient/hessian values.
-    pub deriv: O,
+    deriv: O,
 }
 
 impl<I: IndexT, O: Objective> RowIndex<I, O> {
@@ -118,11 +172,21 @@ impl<I: IndexT, O: Objective> RowIndex<I, O> {
         }
     }
 
-    /// Construct new empty index vector.
+    /// Construct new index vector.
     pub fn new_array(size: usize) -> Vec<Self> {
         (0..size)
             .map(|idx| RowIndex::new(idx, O::derive(0.0, 0.0)))
             .collect()
+    }
+
+    /// Get index value.
+    pub fn as_usize(&self) -> usize {
+        self.index.to_usize()
+    }
+
+    /// Get gradient/hessian values.
+    pub fn grad_hess(&self) -> (f32, f32) {
+        self.deriv.grad_hess()
     }
 }
 
@@ -192,13 +256,13 @@ pub struct LogLoss(f32, f32);
 impl Objective for LogLoss {
     /// Loss: -(y * log(y^) + (1 - y) * log(1 - y^))
     fn loss(y: f32, y_pred: f32) -> f32 {
-        let y_hat = odds(y_pred);
+        let y_hat = sigmoid(y_pred);
         -(y * y_hat.ln() + (1.0 - y) * (1.0 - y_hat).ln())
     }
 
     /// Gradient: y^ - y; Hessian: y^ * (1 - y^)
     fn derive(y: f32, y_pred: f32) -> Self {
-        let y_hat = odds(y_pred);
+        let y_hat = sigmoid(y_pred);
         Self(y_hat - y, y_hat * (1.0 - y_hat))
     }
 
@@ -208,7 +272,7 @@ impl Objective for LogLoss {
 }
 
 /// The sigmoid of `y`: maps a raw score to a probability in (0, 1).
-fn odds(y: f32) -> f32 {
+fn sigmoid(y: f32) -> f32 {
     1.0 / (1.0 + (-y).exp())
 }
 
@@ -217,51 +281,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn valid_small() {
-        // Small dataset (`u8` bins).
-        let features = vec![Feature::default(); 2];
-        let input = vec![vec![0, 1, 2]; 2];
-        let data = Dataset::<u8>::new(features, input, vec![1.0; 3]);
+    fn create_feature() {
+        let feature = Feature::linear("name".into(), vec![1., 2.]);
+        assert_eq!(feature.name(), "name");
+        assert_eq!(feature.kind(), FeatureKind::Linear);
+        assert_eq!(feature.bins(), &[1., 2.]);
 
-        assert!(data.is_valid());
+        let feature = Feature::onehot("other".into(), vec![]);
+        assert_eq!(feature.kind(), FeatureKind::OneHot);
+    }
+
+    #[test]
+    fn create_dataset() {
+        let features = vec![
+            Feature::linear("a".into(), vec![]),
+            Feature::onehot("b".into(), vec![]),
+        ];
+        let empty = Dataset::<u8>::new(features.clone(), vec![vec![]; 2], vec![]).unwrap();
+        assert_eq!(empty.rows(), 0);
+        assert_eq!(empty.features().len(), 2);
+
+        // Small dataset (`u8` bins).
+        let input = vec![vec![0, 1, 2], vec![3, 4, 5]];
+        let data = Dataset::<u8>::new(features.clone(), input, vec![1.0; 3]).unwrap();
         assert_eq!(data.rows(), 3);
         assert_eq!(data.columns(), 2);
-    }
 
-    #[test]
-    fn valid_large() {
+        assert_eq!(data.features()[0].name(), "a");
+        assert_eq!(data.inputs()[0], &[0, 1, 2]);
+        assert_eq!(data.target(), &[1.0, 1.0, 1.0]);
+
         // Large dataset (`u16` bins, target offloaded).
-        let features = vec![Feature::default(); 2];
         let input = vec![vec![0; 1000]; 2];
-        let data = Dataset::<u16>::new(features, input, vec![]);
-
-        assert!(data.is_valid());
+        let data = Dataset::<u16>::new(features, input, vec![]).unwrap();
         assert_eq!(data.rows(), 1000);
         assert_eq!(data.columns(), 2);
+
+        assert_eq!(format!("{data:?}"), "dataset with 2 columns and 1000 rows");
     }
 
     #[test]
-    fn invalid_data() {
+    fn invalid_dataset() {
         let features = vec![Feature::default(); 2];
         let input = vec![vec![0; 3]; 2];
         let create = |f, x, y| Dataset::<u8>::new(f, x, y);
 
-        let empty_dataset = create(vec![], vec![], vec![]);
-        assert!(!empty_dataset.is_valid());
-        let invalid_features = create(vec![Feature::default()], input.clone(), vec![]);
-        assert!(!invalid_features.is_valid());
-        let invalid_input = create(features.clone(), vec![vec![0; 3], vec![1]], vec![]);
-        assert!(!invalid_input.is_valid());
-        let invalid_target = create(features.clone(), input.clone(), vec![1.0]);
-        assert!(!invalid_target.is_valid());
+        let bad_features = create(vec![], vec![], vec![]);
+        assert_eq!(
+            bad_features.unwrap_err().to_string(),
+            "features are not set"
+        );
+
+        let bad_columns = create(vec![Feature::default()], input.clone(), vec![]);
+        assert_eq!(
+            bad_columns.unwrap_err().to_string(),
+            "input columns do not match features"
+        );
+
+        let bad_matrix = create(features.clone(), vec![vec![0; 3], vec![1]], vec![]);
+        assert_eq!(
+            bad_matrix.unwrap_err().to_string(),
+            "input matrix is not dense"
+        );
+
+        let bad_target = create(features.clone(), input.clone(), vec![1.0]);
+        assert_eq!(
+            bad_target.unwrap_err().to_string(),
+            "target size does not match inputs"
+        );
     }
 
     #[test]
-    fn default_index() {
-        let index = RowIndex::<u32, LogLoss>::new_array(10);
+    fn create_rowindex() {
+        let index = RowIndex::<u32, SquaredLoss>::new_array(10);
         for (idx, item) in index.iter().enumerate() {
-            assert_eq!(item.index.to_usize(), idx);
+            assert_eq!(item.as_usize(), idx);
+            assert_eq!(item.grad_hess(), (0.0, 1.0));
         }
+
+        let other = RowIndex::<u64, LogLoss>::new_array(1);
+        assert_eq!(other[0].grad_hess(), (0.5, 0.25));
     }
 
     #[test]

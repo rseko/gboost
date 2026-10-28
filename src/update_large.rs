@@ -9,7 +9,7 @@
 //!   batches.
 //! - `sanitize_name`: maps a `Feature::name` to a file-system-safe extension.
 
-use crate::dataset::{Dataset, Feature, IndexT, Objective, RowIndex};
+use crate::dataset::{Dataset, IndexT, Objective, RowIndex};
 use crate::tree::Tree;
 use anyhow::Result;
 use rand::{RngExt, SeedableRng, rngs::StdRng};
@@ -71,8 +71,6 @@ where
     I: IndexT,
     O: Objective,
 {
-    assert!(data.is_valid());
-    assert!(tree.is_none_or(|t| t.is_valid()));
     assert_eq!(index.len(), data.rows());
 
     // The sampled rows per batch must scale with the dataset size, so the
@@ -91,6 +89,7 @@ where
     assert!(rest <= tail);
 
     let (rows, cols) = (data.rows(), data.columns());
+    let names: Vec<String> = data.features().iter().map(|x| x.name().into()).collect();
     let batch_count = rows.div_ceil(config.bits_per_batch);
     let last_batch = rows - rest;
 
@@ -100,7 +99,7 @@ where
     for _ in 0..batch_count {
         input_slices.push(vec![]);
     }
-    for items in data.inputs.iter_mut() {
+    for items in data.inputs_mut().iter_mut() {
         for (src, dst) in items
             .chunks_mut(config.bits_per_batch)
             .zip(input_slices.iter_mut())
@@ -144,11 +143,10 @@ where
                 || {
                     // Open the dataset's file handles per worker (the `error`
                     // arm defers a failed open until the batch's turn).
-                    let (files, error) =
-                        match UpdateFiles::open(path, &data.features, config.train_step) {
-                            Ok(v) => (Some(v), None),
-                            Err(e) => (None, Some(e)),
-                        };
+                    let (files, error) = match UpdateFiles::open(path, &names, config.train_step) {
+                        Ok(v) => (Some(v), None),
+                        Err(e) => (None, Some(e)),
+                    };
                     (files, error, UpdateBuffers::<T>::new(cols))
                 },
                 |(files, error, buffers), (idx, ((mut inputs, index), seed))| {
@@ -181,7 +179,7 @@ where
         // Sequential path: one shared file-handle set, one shared scratch
         // workspace, and one shared bitmask generator, all reused across
         // batches (allocating exactly once up front).
-        let mut files = UpdateFiles::open(path, &data.features, config.train_step)?;
+        let mut files = UpdateFiles::open(path, &names, config.train_step)?;
         let mut buffers = UpdateBuffers::new(cols);
         let mut mask_gen = BitmaskGenerator::new(BATCH);
 
@@ -299,11 +297,11 @@ impl UpdateFiles {
     /// the target from `target`, the previous step's predictions from
     /// `boost.<train_step>` when present, and the current step's output file
     /// `boost.<train_step + 1>` (step 0 on the first pass).
-    fn open(path: &Path, features: &[Feature], train_step: usize) -> Result<Self> {
-        let input = features
+    fn open(path: &Path, names: &[String], train_step: usize) -> Result<Self> {
+        let input = names
             .iter()
-            .map(|feature| {
-                let name = sanitize_name(&feature.name);
+            .map(|name| {
+                let name = sanitize_name(name);
                 OpenOptions::new()
                     .read(true)
                     .open(path.join(FILENAME_INPUT).with_extension(&name))
@@ -480,6 +478,7 @@ mod tests {
             vec![random_row(), random_row()],
             vec![1.0; NUM_ROWS],
         )
+        .unwrap()
     }
 
     /// A simple tree that predicts a ±0.125 per row.
@@ -495,19 +494,17 @@ mod tests {
         });
         let left = Node::default_leaf(-0.125);
         let right = Node::default_leaf(0.125);
-        Tree {
-            nodes: vec![root, left, right],
-        }
+        Tree::new(vec![root, left, right]).unwrap()
     }
 
     /// Write dataset to temp files.
     fn write_dataset(path: &Path, data: &Dataset<u8>) {
-        for (feature, row) in data.features.iter().zip(&data.inputs) {
+        for (feature, row) in data.features().iter().zip(data.inputs()) {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .open(path.join(FILENAME_INPUT).with_extension(&feature.name))
+                .open(path.join(FILENAME_INPUT).with_extension(feature.name()))
                 .unwrap();
             file.write_all(row.as_bytes()).unwrap();
         }
@@ -517,7 +514,7 @@ mod tests {
             .truncate(true)
             .open(path.join(FILENAME_TARGET))
             .unwrap();
-        file.write_all(data.target.as_bytes()).unwrap();
+        file.write_all(data.target().as_bytes()).unwrap();
     }
 
     #[test]
@@ -531,10 +528,9 @@ mod tests {
         // Truncate the dataset.
         let sampled_rows = NUM_ROWS * NUM_SAMPLES / BATCH;
         let mut index = RowIndex::<u32, SquaredLoss>::new_array(sampled_rows);
-        for row in data.inputs.iter_mut() {
+        for row in data.inputs_mut().iter_mut() {
             row.truncate(sampled_rows);
         }
-        data.target.clear();
 
         // Run the first update.
         let mut config = UpdateConfig {
@@ -558,12 +554,9 @@ mod tests {
 
         // Verify the resulting dataset.
         let sum_inputs = |a: &[u8]| a.iter().map(|x| *x as u64).sum::<u64>();
-        assert_eq!(sum_inputs(&data.inputs[0]), 5797195);
-        assert_eq!(sum_inputs(&data.inputs[1]), 5806821);
-        assert_eq!(
-            index.iter().map(|x| x.deriv.grad_hess().0).sum::<f32>(),
-            -22928.5
-        );
+        assert_eq!(sum_inputs(&data.inputs()[0]), 5797195);
+        assert_eq!(sum_inputs(&data.inputs()[1]), 5806821);
+        assert_eq!(index.iter().map(|x| x.grad_hess().0).sum::<f32>(), -22928.5);
 
         // Run the second update.
         config.train_step += 1;
@@ -581,12 +574,9 @@ mod tests {
         );
 
         // Verify the resulting dataset.
-        assert_eq!(sum_inputs(&data.inputs[0]), 5814872);
-        assert_eq!(sum_inputs(&data.inputs[1]), 5838459);
-        assert_eq!(
-            index.iter().map(|x| x.deriv.grad_hess().0).sum::<f32>(),
-            -22939.0
-        );
+        assert_eq!(sum_inputs(&data.inputs()[0]), 5814872);
+        assert_eq!(sum_inputs(&data.inputs()[1]), 5838459);
+        assert_eq!(index.iter().map(|x| x.grad_hess().0).sum::<f32>(), -22939.0);
 
         // Verify the resulting file.
         let mut predict = vec![0.0_f32; NUM_ROWS];

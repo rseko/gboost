@@ -11,9 +11,9 @@
 use crate::boost_node::{
     BoostNodeOptions, SplitCandidate, SplitStats, Splittable, apply_l1, calc_gain, find_all_splits,
 };
-use crate::dataset::{Dataset, FeatureType, IndexT, Objective, RowIndex};
+use crate::dataset::{Dataset, FeatureKind, IndexT, Objective, RowIndex};
 use crate::histogram::Histogram;
-use crate::tree::{Node, NodeSplit, NodeType, Tree};
+use crate::tree::{Node, NodeKind, NodeSplit, Tree};
 use rand::{rngs::StdRng, seq::SliceRandom};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
@@ -108,7 +108,6 @@ where
         rng: &'a mut StdRng,
         parallel: bool,
     ) -> Self {
-        assert!(dataset.is_valid());
         assert_eq!(index.len(), dataset.rows());
 
         // Row subsampling: keep only the first `sample_size` rows of a
@@ -200,7 +199,7 @@ where
         for idx in 0..self.next_index {
             nodes.push(self.result_nodes.remove(&idx).unwrap());
         }
-        Tree { nodes }
+        Tree::new(nodes).unwrap()
     }
 
     /// Process one batch of queued nodes: find their best splits, record
@@ -225,15 +224,15 @@ where
         // entry of `can_split` in order.
         for (idx, (item, split)) in can_split.iter().enumerate() {
             let base_id = self.next_index + idx * 2;
-            let feature_type = self.dataset.features[split.feature_id].type_;
+            let feature_kind = self.dataset.features()[split.feature_id].kind();
 
             self.result_nodes.insert(
                 item.index,
                 Node {
-                    type_: NodeType::Split(NodeSplit {
+                    kind: NodeKind::Split(NodeSplit {
                         feature_id: split.feature_id,
                         bin_id: split.bin_id,
-                        is_range: feature_type == FeatureType::Linear,
+                        is_range: feature_kind == FeatureKind::Linear,
                         with_missing: split.with_missing,
                         positive_id: base_id,
                         negative_id: base_id + 1,
@@ -255,7 +254,7 @@ where
             self.result_nodes.insert(
                 item.index,
                 Node {
-                    type_: NodeType::Leaf(-weight as f32),
+                    kind: NodeKind::Leaf(-weight as f32),
                     depth: item.depth as u32,
                     cover: hess as f32,
                 },
@@ -302,7 +301,7 @@ where
         let splittables = batch.iter().map(|x| &x.value).collect::<Vec<_>>();
         let results = find_all_splits(
             splittables,
-            &self.dataset.features,
+            self.dataset.features(),
             self.node_options,
             self.parallel,
         );
@@ -317,7 +316,7 @@ where
 
         // Enforce the budget by keeping the highest-gain splits and
         // demoting the rest to leaves.
-        can_split.sort_by(|a, b| a.1.gain.partial_cmp(&b.1.gain).unwrap());
+        can_split.sort_by(|a, b| b.1.gain.partial_cmp(&a.1.gain).unwrap());
         if can_split.len() > self.leaf_budget {
             let tail = can_split.split_off(self.leaf_budget);
             cannot_split.extend(tail.into_iter().map(|x| x.0));
