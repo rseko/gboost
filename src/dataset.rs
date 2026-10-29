@@ -313,7 +313,7 @@ mod tests {
         let feature = Feature::onehot(Some("other".into()), vec![]);
         assert_eq!(feature.name(), "other");
         assert_eq!(feature.kind(), FeatureKind::OneHot);
-        assert_eq!(feature.bins(), &[]);
+        assert_eq!(feature.bins(), &[] as &[f32]);
     }
 
     #[test]
@@ -341,7 +341,7 @@ mod tests {
 
         data.slices_mut()[0][0] = 6;
         assert_eq!(data.inputs()[0][0], 6);
-        assert_eq!(data.target_mut(), &mut []);
+        assert_eq!(data.target_mut(), &mut [] as &mut [f32]);
         assert_eq!(format!("{data:?}"), "dataset with 2 columns and 1000 rows");
     }
 
