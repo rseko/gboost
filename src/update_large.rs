@@ -12,7 +12,7 @@
 use crate::dataset::{Dataset, IndexT, Objective, RowIndex};
 use crate::tree::Tree;
 use anyhow::Result;
-use rand::{RngExt, SeedableRng, rngs::StdRng};
+use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -383,66 +383,42 @@ impl UpdateFiles {
 /// Generates pseudorandom bitmasks selecting a subset of rows within a batch.
 /// Each call to [`BitmaskGenerator::next`] returns a uniformly random subset
 /// of the requested size, independent of previous calls (rows may be
-/// re-sampled across calls). The `index` field is persistent scratch that
-/// backs the partial Fisher–Yates shuffle used below.
-struct BitmaskGenerator {
-    index: Vec<u16>,
-    total: usize,
-}
+/// re-sampled across calls).
+struct BitmaskGenerator(Vec<u16>);
 
 impl BitmaskGenerator {
-    /// Create a bitmask generator that samples within `total` rows
-    /// (must be `<= BATCH`), initializing the persistent shuffle scratch.
     fn new(total: usize) -> Self {
         assert!(total <= BATCH);
-        Self {
-            index: (0..total).map(|i| i as u16).collect(),
-            total,
-        }
+        Self((0..total).map(|i| i as u16).collect())
     }
 
     /// Return a bitmask of `bits` uniformly-randomly chosen rows out of
     /// `total`. Successive calls are independent: each one picks a fresh
-    /// random subset of exactly `bits` rows (no replacement within a call),
-    /// and `rng` only needs to provide `bits` (or `total - bits`) random
-    /// integers. The retained `index` scratch is reused across calls, but
-    /// Fisher–Yates yields a uniform subset from any starting permutation,
-    /// so the residual state does not bias the result. When the chosen set is
-    /// the majority, it is cheaper to invert (start all-ones and clear the
-    /// unchosen).
+    /// random subset of exactly `bits` rows (no replacement within a call).
     fn next(&mut self, rng: &mut StdRng, bits: usize) -> Vec<u64> {
-        assert!(bits <= self.total);
-        if bits <= self.total / 2 {
-            // Partial Fisher–Yates: iteratively pick a random pivot in
-            // `[i, total)`, swap it into slot `i`, and record the row id now
-            // sitting at slot `i` as the chosen bit.
-            //
+        let total = self.0.len();
+        assert!(bits <= total);
+
+        if bits <= total / 2 {
             // Start from an empty mask and set the chosen bits.
-            let mut mask = vec![0; self.total.div_ceil(64)];
-            for i in 0..bits {
-                let j = rng.random_range(i..self.total);
-                self.index.swap(i, j);
-                let (m, n) = (self.index[i] >> 6, self.index[i] & 63);
+            let mut mask = vec![0; total.div_ceil(64)];
+            for bit in self.0.partial_shuffle(rng, bits).0.iter() {
+                let (m, n) = (bit >> 6, bit & 63);
                 mask[m as usize] |= 1 << n;
             }
             mask
         } else {
-            // Same shuffle as above, but recording the *unchosen* rows so we
-            // only need `total - bits` draws.
-            //
             // Chosen set is a majority: start all-ones and clear the unchosen.
-            let mut mask = vec![u64::MAX; self.total.div_ceil(64)];
-            for i in 0..(self.total - bits) {
-                let j = rng.random_range(i..self.total);
-                self.index.swap(i, j);
-                let (m, n) = (self.index[i] >> 6, self.index[i] & 63);
+            let mut mask = vec![u64::MAX; total.div_ceil(64)];
+            for bit in self.0.partial_shuffle(rng, total - bits).0.iter() {
+                let (m, n) = (bit >> 6, bit & 63);
                 mask[m as usize] &= !(1 << n);
             }
             // `u64::MAX` seed set every bit including the spurious ones past
             // `total`; mask the last word down to just the valid `last_bits`
-            // so rows beyond the batch aren't accidentally marked.
-            if !self.total.is_multiple_of(64) {
-                let last_bits = self.total % 64;
+            // so rows beyond the batch aren't marked.
+            if !total.is_multiple_of(64) {
+                let last_bits = total % 64;
                 *mask.last_mut().unwrap() &= (1 << last_bits) - 1;
             }
             mask
@@ -472,8 +448,8 @@ mod tests {
 
         Dataset::new(
             vec![
-                Feature::linear("1".into(), vec![]),
-                Feature::linear("2".into(), vec![]),
+                Feature::linear(Some("1".into()), vec![]),
+                Feature::linear(Some("2".into()), vec![]),
             ],
             vec![random_row(), random_row()],
             vec![1.0; NUM_ROWS],
@@ -554,9 +530,12 @@ mod tests {
 
         // Verify the resulting dataset.
         let sum_inputs = |a: &[u8]| a.iter().map(|x| *x as u64).sum::<u64>();
-        assert_eq!(sum_inputs(&data.inputs()[0]), 5797195);
-        assert_eq!(sum_inputs(&data.inputs()[1]), 5806821);
-        assert_eq!(index.iter().map(|x| x.grad_hess().0).sum::<f32>(), -22928.5);
+        assert_eq!(sum_inputs(&data.inputs()[0]), 5810726);
+        assert_eq!(sum_inputs(&data.inputs()[1]), 5832598);
+        assert_eq!(
+            index.iter().map(|x| x.grad_hess().0).sum::<f32>(),
+            -22910.25
+        );
 
         // Run the second update.
         config.train_step += 1;
@@ -574,9 +553,12 @@ mod tests {
         );
 
         // Verify the resulting dataset.
-        assert_eq!(sum_inputs(&data.inputs()[0]), 5814872);
-        assert_eq!(sum_inputs(&data.inputs()[1]), 5838459);
-        assert_eq!(index.iter().map(|x| x.grad_hess().0).sum::<f32>(), -22939.0);
+        assert_eq!(sum_inputs(&data.inputs()[0]), 5819437);
+        assert_eq!(sum_inputs(&data.inputs()[1]), 5827921);
+        assert_eq!(
+            index.iter().map(|x| x.grad_hess().0).sum::<f32>(),
+            -22950.50
+        );
 
         // Verify the resulting file.
         let mut predict = vec![0.0_f32; NUM_ROWS];

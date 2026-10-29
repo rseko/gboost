@@ -12,7 +12,7 @@ const NUM_COLS: usize = 128;
 const NUM_BINS: usize = 255;
 
 fn create_dataset(rng: &mut StdRng) -> Dataset<u8> {
-    let feature = Feature::linear("".into(), vec![0.0; NUM_BINS]);
+    let feature = Feature::linear(None, vec![0.0; NUM_BINS]);
     let mut new_row = || {
         let mut row = vec![0; NUM_ROWS];
         rng.fill_bytes(&mut row);
@@ -28,8 +28,8 @@ fn create_dataset(rng: &mut StdRng) -> Dataset<u8> {
 
 fn create_tree(rng: &mut StdRng, depth: u32) -> Tree {
     let mut nodes = vec![];
-    let total = 1 << depth;
-    for idx in 1..(total / 2) {
+    let leaves = (1 << depth) / 2;
+    for idx in 1..leaves {
         nodes.push(Node::default_split(NodeSplit {
             feature_id: rng.random_range(0..NUM_COLS),
             bin_id: rng.random_range(0..NUM_BINS),
@@ -40,7 +40,7 @@ fn create_tree(rng: &mut StdRng, depth: u32) -> Tree {
             gain: 0.0,
         }));
     }
-    for idx in 0..(total / 2) {
+    for idx in 1..=leaves {
         nodes.push(Node::default_leaf(idx as f32))
     }
     Tree::new(nodes).unwrap()

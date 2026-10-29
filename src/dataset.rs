@@ -26,7 +26,7 @@ pub enum FeatureKind {
 #[derive(Clone, Debug)]
 pub struct Feature {
     /// Original column name from the source data.
-    name: String,
+    name: Option<String>,
     /// Kind defines how values are matched.
     kind: FeatureKind,
     /// The bin boundaries split the original domain into `bins.len()` ranges.
@@ -37,7 +37,7 @@ pub struct Feature {
 
 impl Feature {
     /// Build a feature with `FeatureKind::OneHot`.
-    pub fn onehot(name: String, bins: Vec<f32>) -> Self {
+    pub fn onehot(name: Option<String>, bins: Vec<f32>) -> Self {
         Self {
             kind: FeatureKind::OneHot,
             name,
@@ -46,7 +46,7 @@ impl Feature {
     }
 
     /// Build a feature with `FeatureKind::Linear`.
-    pub fn linear(name: String, bins: Vec<f32>) -> Self {
+    pub fn linear(name: Option<String>, bins: Vec<f32>) -> Self {
         Self {
             kind: FeatureKind::Linear,
             name,
@@ -56,7 +56,7 @@ impl Feature {
 
     /// Get feature name.
     pub fn name(&self) -> &str {
-        &self.name
+        self.name.as_ref().map_or("", |x| x.as_str())
     }
 
     /// Get feature kind.
@@ -73,7 +73,7 @@ impl Feature {
 /// A linear feature with no name and no bins (used in tests).
 impl Default for Feature {
     fn default() -> Self {
-        Self::linear(String::new(), Vec::new())
+        Self::linear(None, Vec::new())
     }
 }
 
@@ -292,7 +292,7 @@ fn sigmoid(y: f32) -> f32 {
 pub(crate) fn create_test_dataset(columns: usize, rows: usize, bins: usize) -> Dataset<u16> {
     let bins = (0..bins).map(|i| i as f32).collect::<Vec<_>>();
     Dataset::<u16>::new(
-        vec![Feature::linear("".into(), bins); columns],
+        vec![Feature::linear(None, bins); columns],
         vec![vec![0; rows]; columns],
         vec![0.0; rows],
     )
@@ -305,12 +305,12 @@ mod tests {
 
     #[test]
     fn create_feature() {
-        let feature = Feature::linear("name".into(), vec![1., 2.]);
+        let feature = Feature::linear(Some("name".into()), vec![1., 2.]);
         assert_eq!(feature.name(), "name");
         assert_eq!(feature.kind(), FeatureKind::Linear);
         assert_eq!(feature.bins(), &[1., 2.]);
 
-        let feature = Feature::onehot("other".into(), vec![]);
+        let feature = Feature::onehot(Some("other".into()), vec![]);
         assert_eq!(feature.name(), "other");
         assert_eq!(feature.kind(), FeatureKind::OneHot);
         assert_eq!(feature.bins(), &[]);
@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn create_dataset() {
         let features = vec![
-            Feature::linear("a".into(), vec![]),
-            Feature::onehot("b".into(), vec![]),
+            Feature::linear(None, vec![]),
+            Feature::onehot(None, vec![]),
         ];
         let empty = Dataset::<u8>::new(features.clone(), vec![vec![]; 2], vec![]).unwrap();
         assert_eq!(empty.columns(), 2);
@@ -332,7 +332,7 @@ mod tests {
         assert_eq!(data.columns(), 2);
         assert_eq!(data.rows(), 3);
 
-        assert_eq!(data.features()[0].name(), "a");
+        assert_eq!(data.features()[0].kind(), FeatureKind::Linear);
         assert_eq!(data.inputs()[0], &[0, 1, 2]);
         assert_eq!(data.target(), &[1.0, 1.0, 1.0]);
 
