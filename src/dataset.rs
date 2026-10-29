@@ -119,7 +119,7 @@ impl<T> Dataset<T> {
 
     /// Number of rows in the dataset.
     pub fn rows(&self) -> usize {
-        self.inputs.first().map(|x| x.len()).unwrap()
+        self.inputs.first().map_or(0, |x| x.len())
     }
 
     /// Get features reference.

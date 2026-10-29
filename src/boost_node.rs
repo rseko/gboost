@@ -340,7 +340,8 @@ impl SplitStats {
 
 /// Calculate regularized gain.
 pub fn calc_gain(gradient: f64, hessian: f64, l1: f64, l2: f64) -> f64 {
-    apply_l1(gradient, l1).powi(2) / (hessian + l2)
+    let gain = apply_l1(gradient, l1).powi(2) / (hessian + l2);
+    if gain.is_finite() { gain } else { 0.0 }
 }
 
 /// Soft-threshold `gradient` by `l1` - the L1-regularized gradient.
@@ -597,6 +598,7 @@ mod tests {
         assert_eq!(apply_l1(0.25, 0.3), 0.0);
         assert_eq!(apply_l1(0.5, 0.3), 0.2);
         assert_eq!(calc_gain(2.0, 1.0, 0.2, 0.2), 2.7);
+        assert_eq!(calc_gain(0.0, 0.0, 0.0, 0.0), 0.0);
     }
 
     #[test]
