@@ -2,7 +2,9 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use rand::{Rng, RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::time::Duration;
 
-use gboost::dataset::{Dataset, Feature, IndexT, RowIndex, SquaredLoss as Loss};
+use gboost::boost_node::BoostNodeOptions;
+use gboost::boost_tree::{BoostTreeOptions, TreeBuilder};
+use gboost::dataset::{Dataset, Feature, IndexT, Objective, RowIndex, SquaredLoss as Loss};
 use gboost::histogram::Histogram;
 use gboost::tree::{Node, NodeSplit, Tree};
 use gboost::update_small::update_small;
@@ -68,6 +70,30 @@ fn bench_main<T: IndexT>(c: &mut Criterion, prefix: &str) {
     });
     c.bench_function(&name("update:N"), |b| {
         b.iter(|| update_small(&mut predict, &mut index, &data, Some(&tree), true));
+    });
+
+    let tree_options = BoostTreeOptions::default();
+    let node_options = BoostNodeOptions::default();
+    let mut build_tree = |parallel: bool| {
+        let mut index = (0..NUM_ROWS)
+            .map(|i| RowIndex::<T, Loss>::new(i, Loss::derive(1.0, rng.random_range(0.0..=1.0))))
+            .collect::<Vec<_>>();
+        TreeBuilder::new(
+            &mut index,
+            &data,
+            &tree_options,
+            &node_options,
+            &mut rng,
+            parallel,
+        )
+        .execute()
+    };
+
+    c.bench_function(&name("tree:1"), |b| {
+        b.iter(|| build_tree(false));
+    });
+    c.bench_function(&name("tree:N"), |b| {
+        b.iter(|| build_tree(true));
     });
 }
 

@@ -354,9 +354,11 @@ mod tests {
         });
         assert_eq!(
             tree.to_string(None),
-            "0:[0 == 1 | null] yes=1,no=2,gain=0.1,cover=0\n    \
-                1:value=0.1,cover=0\n    \
-                2:value=0.2,cover=0"
+            concat!(
+                "0:[0 == 1 | null] yes=1,no=2,gain=0.1,cover=0\n",
+                "    1:value=0.1,cover=0\n",
+                "    2:value=0.2,cover=0",
+            )
         );
 
         update_root(&mut tree, |split| {
@@ -371,9 +373,11 @@ mod tests {
         let feature = Feature::linear(Some("name".into()), vec![3.0, 4.0]);
         assert_eq!(
             tree.to_string(Some(&[feature])),
-            "0:[name <= 3] yes=1,no=2,gain=0.1,cover=0\n    \
-                1:value=0.1,cover=0\n    \
-                2:value=0.2,cover=0"
+            concat!(
+                "0:[name <= 3] yes=1,no=2,gain=0.1,cover=0\n",
+                "    1:value=0.1,cover=0\n",
+                "    2:value=0.2,cover=0",
+            )
         );
 
         let feature = Feature::onehot(None, vec![]);

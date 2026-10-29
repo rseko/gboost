@@ -54,6 +54,8 @@ pub(crate) struct Splittable<'a, I: IndexT, O: Objective> {
     pub histogram: Histogram,
     /// The node's aggregate statistics (including its own gain term).
     pub stats: SplitStats,
+    /// Subset of columns to evaluate (optional).
+    pub columns: Option<Vec<usize>>,
 }
 
 /// A candidate split of one feature: its bin, whether it folds missing rows
@@ -96,7 +98,7 @@ pub(crate) struct SplitStats {
 ///
 /// `feature_id` is filled in by the caller per feature, and `bin_id` is
 /// 1-indexed (compare against `Feature::bins[bin_id - 1]`).
-pub(crate) fn find_split(
+fn find_split(
     histogram: &[(f64, f64)],
     stats: &SplitStats,
     options: &BoostNodeOptions,
@@ -210,27 +212,31 @@ pub(crate) fn find_all_splits<I: IndexT, O: Objective>(
     options: &BoostNodeOptions,
     parallel: bool,
 ) -> Vec<Option<SplitCandidate>> {
+    let find = |item: &Splittable<I, O>, column: usize| {
+        let (hist, feat) = (item.histogram.get(column), &features[column]);
+        let mut res = find_split(hist, &item.stats, options, feat.kind())?;
+        res.feature_id = column;
+        Some(res)
+    };
+    let select = |a: &SplitCandidate, b: &SplitCandidate| a.gain.partial_cmp(&b.gain).unwrap();
+
     if parallel {
         // One task per (splittable, column) pair; `idx` is monotonically
         // non-decreasing across the flattened list, so the gather below may
         // chunk by it.
-        let tasks = splittables
-            .iter()
-            .enumerate()
-            .flat_map(|(idx, item)| item.histogram.iter().map(move |col| (idx, col)))
-            .collect::<Vec<_>>();
+        let mut tasks = vec![];
+        for (idx, item) in splittables.iter().enumerate() {
+            match &item.columns {
+                Some(cols) => tasks.extend(cols.iter().map(|&col| (idx, col))),
+                None => tasks.extend(item.histogram.iter().map(|col| (idx, col))),
+            }
+        }
 
         // Score each pair independently (no shared state), keeping only
         // splittables that found at least one candidate.
         let candidates = tasks
             .into_par_iter()
-            .filter_map(|(idx, col)| {
-                let item = splittables[idx];
-                let (hist, feat) = (item.histogram.get(col), &features[col]);
-                let mut res = find_split(hist, &item.stats, options, feat.kind())?;
-                res.feature_id = col;
-                Some((idx, res))
-            })
+            .filter_map(|(idx, col)| find(splittables[idx], col).map(|res| (idx, res)))
             .collect::<Vec<_>>();
 
         // Fold the partials back per splittable: best candidate per splittable
@@ -238,24 +244,23 @@ pub(crate) fn find_all_splits<I: IndexT, O: Objective>(
         // the input order is preserved).
         let mut results = vec![None; splittables.len()];
         for (idx, group) in &candidates.into_iter().chunk_by(|(idx, _)| *idx) {
-            results[idx] = group
-                .map(|(_, res)| res)
-                .max_by(|a, b| a.gain.partial_cmp(&b.gain).unwrap());
+            results[idx] = group.map(|(_, res)| res).max_by(select);
         }
         results
     } else {
         // Sequential equivalent: same per-splittable best-gain candidate,
         // kept in input order (a splittable with no candidate maps to `None`).
         let find_best_split = |item: &Splittable<I, O>| {
-            item.histogram
-                .iter()
-                .filter_map(|col| {
-                    let (hist, feat) = (item.histogram.get(col), &features[col]);
-                    let mut res = find_split(hist, &item.stats, options, feat.kind())?;
-                    res.feature_id = col;
-                    Some(res)
-                })
-                .max_by(|a, b| a.gain.partial_cmp(&b.gain).unwrap())
+            if let Some(cols) = &item.columns {
+                cols.iter()
+                    .filter_map(|&col| find(item, col))
+                    .max_by(select)
+            } else {
+                item.histogram
+                    .iter()
+                    .filter_map(|col| find(item, col))
+                    .max_by(select)
+            }
         };
         splittables.into_iter().map(find_best_split).collect()
     }
@@ -293,7 +298,7 @@ impl<'a, I: IndexT, O: Objective> Splittable<'a, I, O> {
         // On a non-final split, keep the larger side's existing histogram and
         // rebuild the smaller side from scratch, subtracting it to recover
         // the other side's histogram - cheaper than building both.
-        let columns = || self.histogram.iter().collect::<HashSet<_>>();
+        let columns = || HashSet::from_iter(self.histogram.iter());
 
         let (hist_left, hist_right) = if final_split {
             (Histogram::new(&[], None), Histogram::new(&[], None))
@@ -311,11 +316,13 @@ impl<'a, I: IndexT, O: Objective> Splittable<'a, I, O> {
             index: index_left,
             histogram: hist_left,
             stats: split.positive,
+            columns: None,
         };
         let right = Self {
             index: index_right,
             histogram: hist_right,
             stats: split.negative,
+            columns: None,
         };
         (left, right)
     }
@@ -416,18 +423,19 @@ mod tests {
             index: &mut [],
             histogram,
             stats,
+            columns: None,
         }
     }
 
     // Find best split helper.
     fn test_find_split(
-        splittable: Splittable<'_, u32, SquaredLoss>,
+        splittable: &Splittable<'_, u32, SquaredLoss>,
         features: Option<&[Feature]>,
         options: &BoostNodeOptions,
     ) -> Option<SplitCandidate> {
         let default = vec![Feature::default(); 3];
         let mut result = find_all_splits(
-            vec![&splittable],
+            vec![splittable],
             features.unwrap_or(&default),
             options,
             false,
@@ -444,7 +452,7 @@ mod tests {
         };
         let expected_gain = 0.13719512195121952;
         assert_eq!(
-            test_find_split(build_splittable(), None, &options),
+            test_find_split(&build_splittable(), None, &options),
             Some(SplitCandidate {
                 feature_id: 2,
                 bin_id: 1,
@@ -462,10 +470,10 @@ mod tests {
             min_split_gain: v,
             ..Default::default()
         };
-        let res1 = test_find_split(build_splittable(), None, &options(0.32));
+        let res1 = test_find_split(&build_splittable(), None, &options(0.32));
         assert!(res1.is_none(), "{res1:?}");
 
-        let res2 = test_find_split(build_splittable(), None, &options(0.3));
+        let res2 = test_find_split(&build_splittable(), None, &options(0.3));
         assert!(res2.is_some(), "{res2:?}");
         assert_eq!(res2.unwrap().gain, 0.3125);
     }
@@ -479,7 +487,7 @@ mod tests {
         let mut splittable = build_splittable();
         splittable.histogram.data_mut()[2].0 = -1.0;
         assert_eq!(
-            test_find_split(splittable, None, &options(2.0)),
+            test_find_split(&splittable, None, &options(2.0)),
             Some(SplitCandidate {
                 feature_id: 0,
                 bin_id: 2,
@@ -492,10 +500,10 @@ mod tests {
 
         let mut splittable = build_splittable();
         splittable.stats.hessian -= 0.001;
-        let with_eps = test_find_split(splittable, None, &options(2.0));
+        let with_eps = test_find_split(&splittable, None, &options(2.0));
         assert_eq!(with_eps.map(|x| (x.feature_id, x.bin_id)).unwrap(), (2, 2));
 
-        let too_large = test_find_split(build_splittable(), None, &options(5.0));
+        let too_large = test_find_split(&build_splittable(), None, &options(5.0));
         assert!(too_large.is_none(), "{too_large:?}");
     }
 
@@ -508,7 +516,7 @@ mod tests {
         let mut splittable = build_splittable();
         splittable.histogram.data_mut()[4].0 = -1.0;
         assert_eq!(
-            test_find_split(splittable, None, &options),
+            test_find_split(&splittable, None, &options),
             Some(SplitCandidate {
                 feature_id: 1,
                 bin_id: 0,
@@ -527,7 +535,7 @@ mod tests {
         splittable.histogram.data_mut()[4].0 = -2.0;
         splittable.histogram.data_mut()[7].0 = -2.0;
         assert_eq!(
-            test_find_split(splittable, Some(&features), &BoostNodeOptions::default()),
+            test_find_split(&splittable, Some(&features), &BoostNodeOptions::default()),
             Some(SplitCandidate {
                 feature_id: 1,
                 bin_id: 3,
@@ -542,9 +550,9 @@ mod tests {
     #[test]
     fn search_partial() {
         let mut splittable = build_splittable();
-        splittable.histogram.compress(&HashSet::from([0, 1]));
+        splittable.columns = Some(vec![0, 1]);
         assert_eq!(
-            test_find_split(splittable, None, &BoostNodeOptions::default()),
+            test_find_split(&splittable, None, &BoostNodeOptions::default()),
             Some(SplitCandidate {
                 feature_id: 1,
                 bin_id: 1,
@@ -560,8 +568,9 @@ mod tests {
     fn search_parallel() {
         let features = vec![Feature::default(); 3];
         let options = BoostNodeOptions::default();
+        let mut splittable = build_splittable();
         assert_eq!(
-            find_all_splits(vec![&build_splittable()], &features, &options, true)[0],
+            find_all_splits(vec![&splittable], &features, &options, true)[0],
             Some(SplitCandidate {
                 feature_id: 2,
                 bin_id: 1,
@@ -572,11 +581,12 @@ mod tests {
             })
         );
 
+        splittable.columns = Some(vec![0, 1]);
         let restricted = BoostNodeOptions {
             min_split_gain: 1.0,
             ..options
         };
-        let result = find_all_splits(vec![&build_splittable()], &features, &restricted, true);
+        let result = find_all_splits(vec![&splittable], &features, &restricted, true);
         assert!(result[0].is_none(), "{result:?}");
     }
 

@@ -80,7 +80,7 @@ pub struct TreeBuilder<'a, T: Copy + Into<usize> + Sync, I: IndexT, O: Objective
     result_nodes: HashMap<usize, Node>,
     /// Remaining split budget; `max_leaves.overflowing_sub(1)` so that a
     /// limit of `k` leaves allows at most `k - 1` splits.
-    leaf_budget: usize,
+    split_budget: usize,
     /// Next free node index to assign.
     next_index: usize,
     /// Whether the split search and partitioning run on a thread pool.
@@ -116,21 +116,14 @@ where
         let subsample = tree_options.subsample < 1.0;
         if subsample {
             let sample_size = get_sample_size(index.len(), tree_options.subsample);
-            (index, _) = index.partial_shuffle(rng, sample_size);
+            index = index.partial_shuffle(rng, sample_size).0;
         }
 
         // Feature subsampling for the whole tree.
-        let mut columns = (0..dataset.columns()).collect::<Vec<_>>();
+        let mut columns = Vec::from_iter(0..dataset.columns());
         if tree_options.colsample_bytree < 1.0 {
             let sample_size = get_sample_size(columns.len(), tree_options.colsample_bytree);
             columns = columns.partial_shuffle(rng, sample_size).0.to_vec();
-        };
-
-        // Seed level 0's feature set, used by `select_subsample` to derive
-        // a fresh sampled set for each subsequent depth.
-        let mut columns_bylevel = Vec::new();
-        if tree_options.colsample_bylevel < 1.0 {
-            columns_bylevel.push(columns.clone());
         }
 
         // The root's histogram over the sampled rows and features.
@@ -146,35 +139,37 @@ where
         let (l1, l2) = (node_options.reg_alpha, node_options.reg_lambda);
         let gain = calc_gain(gradient, hessian, l1, l2);
 
-        let root = IndexedSplittable {
-            index: 0,
-            depth: 0,
-            value: Splittable {
-                index,
-                histogram,
-                stats: SplitStats::new(gradient, hessian, gain),
+        // Create the builder instance.
+        let mut builder = Self {
+            pool: if tree_options.loss_guide {
+                BuilderPool::LossGuide(BinaryHeap::new())
+            } else {
+                BuilderPool::DepthWise(Vec::new())
             },
-        };
-        // Pick the pool policy: best-gain-first vs. level-order.
-        let pool = if tree_options.loss_guide {
-            BuilderPool::LossGuide(BinaryHeap::from([root]))
-        } else {
-            BuilderPool::DepthWise(Vec::from([root]))
-        };
-
-        Self {
-            pool,
             dataset,
             tree_options,
             node_options,
             rng,
-            columns_bylevel,
+            columns_bylevel: Vec::new(),
             result_nodes: HashMap::new(),
             // `max_leaves = 0` wraps to `usize::MAX` (no limit).
-            leaf_budget: tree_options.max_leaves.overflowing_sub(1).0,
+            split_budget: tree_options.max_leaves.overflowing_sub(1).0,
             next_index: 1,
             parallel,
-        }
+        };
+
+        // Add root node, apply subsampling.
+        builder.add_to_pool(IndexedSplittable {
+            index: 0,
+            depth: 0,
+            value: Box::new(Splittable {
+                index,
+                histogram,
+                stats: SplitStats::new(gradient, hessian, gain),
+                columns: None,
+            }),
+        });
+        builder
     }
 
     /// Build the whole tree and return it, driving `process` batches
@@ -216,7 +211,7 @@ where
 
         let depth_limit = self.tree_options.max_depth.overflowing_sub(1).0;
         let (can_split, cannot_split) = self.partition_batch(batch, depth_limit);
-        self.leaf_budget -= can_split.len();
+        self.split_budget -= can_split.len();
 
         // Record one split node per node that is being split. Each node's
         // two children receive the next two free indices, so `base_id` is
@@ -236,7 +231,7 @@ where
                         with_missing: split.with_missing,
                         positive_id: base_id,
                         negative_id: base_id + 1,
-                        gain: item.value.stats.gain as f32,
+                        gain: split.gain as f32,
                     }),
                     depth: item.depth as u32,
                     cover: item.value.stats.hessian as f32,
@@ -267,13 +262,11 @@ where
         if !can_split.is_empty() {
             let next_depth = can_split[0].0.depth + 1;
             for splittable in self.perform_splits(can_split, depth_limit) {
-                let mut item = IndexedSplittable {
+                self.add_to_pool(IndexedSplittable {
                     index: self.next_index,
                     depth: next_depth,
-                    value: splittable,
-                };
-                self.select_subsample(&mut item);
-                self.add_to_pool(item);
+                    value: Box::new(splittable),
+                });
                 self.next_index += 1;
             }
         }
@@ -293,12 +286,12 @@ where
         batch: Vec<IndexedSplittable<'a, I, O>>,
         depth_limit: usize,
     ) -> PartitionedResult<'a, I, O> {
-        if self.leaf_budget == 0 || batch[0].depth > depth_limit {
+        if self.split_budget == 0 || batch[0].depth > depth_limit {
             return (vec![], batch);
         }
 
         let (mut can_split, mut cannot_split) = (vec![], vec![]);
-        let splittables = batch.iter().map(|x| &x.value).collect::<Vec<_>>();
+        let splittables = Vec::from_iter(batch.iter().map(|x| x.value.as_ref()));
         let results = find_all_splits(
             splittables,
             self.dataset.features(),
@@ -317,8 +310,8 @@ where
         // Enforce the budget by keeping the highest-gain splits and
         // demoting the rest to leaves.
         can_split.sort_by(|a, b| b.1.gain.partial_cmp(&a.1.gain).unwrap());
-        if can_split.len() > self.leaf_budget {
-            let tail = can_split.split_off(self.leaf_budget);
+        if can_split.len() > self.split_budget {
+            let tail = can_split.split_off(self.split_budget);
             cannot_split.extend(tail.into_iter().map(|x| x.0));
         }
 
@@ -338,7 +331,7 @@ where
         group
             .into_iter()
             .flat_map(|(item, split)| {
-                let final_split = self.leaf_budget == 0 || item.depth == depth_limit;
+                let final_split = self.split_budget == 0 || item.depth == depth_limit;
                 let (left, right) =
                     item.value
                         .split(split, self.dataset, final_split, self.parallel);
@@ -347,41 +340,41 @@ where
             .collect()
     }
 
-    /// Apply the level/node feature subsampling to a child node's
-    /// histogram before it is queued.
-    ///
-    /// Per level: derive a freshly sampled feature set when a new depth is
-    /// first reached, then restrict the histogram to that set. Per node:
-    /// additionally restrict the histogram to a freshly sampled subset of
-    /// whatever is left.
+    /// Apply column sampling to a node's candidate features: `colsample_bylevel`
+    /// samples a set once per tree depth, then `colsample_bynode` samples from
+    /// that node's columns; the result is stored in `item.value.columns`.
     fn select_subsample(&mut self, item: &mut IndexedSplittable<'a, I, O>) {
+        let get_tree_columns = || Vec::from_iter(item.value.histogram.iter());
+
         if self.tree_options.colsample_bylevel < 1.0 {
-            // First time this depth is reached: sample from the previous
+            // First time this depth is reached: sample from the root
             // level's set and record it.
             if item.depth == self.columns_bylevel.len() {
-                let mut columns = self.columns_bylevel[item.depth - 1].clone();
+                let mut columns = get_tree_columns();
                 let sample_size =
                     get_sample_size(columns.len(), self.tree_options.colsample_bylevel);
                 columns = columns.partial_shuffle(self.rng, sample_size).0.to_vec();
                 self.columns_bylevel.push(columns);
             }
-
-            let columns_set = HashSet::from_iter(self.columns_bylevel[item.depth].iter().cloned());
-            item.value.histogram.compress(&columns_set);
+            item.value.columns = Some(self.columns_bylevel[item.depth].clone());
         }
 
         if self.tree_options.colsample_bynode < 1.0 {
-            let mut columns = Vec::from_iter(item.value.histogram.iter());
+            let mut columns = match &mut item.value.columns {
+                Some(cols) => std::mem::take(cols),
+                None => get_tree_columns(),
+            };
             let sample_size = get_sample_size(columns.len(), self.tree_options.colsample_bynode);
-            let slice = columns.partial_shuffle(self.rng, sample_size).0;
-
-            let columns_set = HashSet::from_iter(slice.iter().copied());
-            item.value.histogram.compress(&columns_set);
+            columns = columns.partial_shuffle(self.rng, sample_size).0.to_vec();
+            item.value.columns = Some(columns);
         }
     }
 
     /// Push a node into the work queue.
-    fn add_to_pool(&mut self, item: IndexedSplittable<'a, I, O>) {
+    fn add_to_pool(&mut self, mut item: IndexedSplittable<'a, I, O>) {
+        if !item.value.histogram.data().is_empty() {
+            self.select_subsample(&mut item);
+        }
         match &mut self.pool {
             BuilderPool::DepthWise(array) => array.push(item),
             BuilderPool::LossGuide(heap) => heap.push(item),
@@ -405,7 +398,7 @@ where
 
 /// Number of items to keep for a subsample ratio, clamped to at least one.
 fn get_sample_size(total: usize, ratio: f64) -> usize {
-    ((total as f64 * ratio) as usize).max(1)
+    ((total as f64 * ratio).round() as usize).max(1)
 }
 
 /// One entry in the work queue: a node's state plus its bookkeeping.
@@ -415,7 +408,7 @@ struct IndexedSplittable<'a, I: IndexT, O: Objective> {
     /// Distance of the node from the root.
     depth: usize,
     /// The node's rows, histogram, and stats.
-    value: Splittable<'a, I, O>,
+    value: Box<Splittable<'a, I, O>>,
 }
 
 /// A node paired with the split candidate that will be applied to it.
@@ -445,14 +438,163 @@ impl<'a, I: IndexT, O: Objective> PartialOrd for IndexedSplittable<'a, I, O> {
 
 impl<'a, I: IndexT, O: Objective> Ord for IndexedSplittable<'a, I, O> {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.value.stats.gain.total_cmp(&self.value.stats.gain)
+        self.value.stats.gain.total_cmp(&other.value.stats.gain)
     }
 }
 
 impl<'a, I: IndexT, O: Objective> PartialEq for IndexedSplittable<'a, I, O> {
     fn eq(&self, other: &Self) -> bool {
-        self.value.stats.gain == other.value.stats.gain
+        self.cmp(other) == Ordering::Equal
     }
 }
 
 impl<'a, I: IndexT, O: Objective> Eq for IndexedSplittable<'a, I, O> {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset::{SquaredLoss, create_test_dataset};
+    use rand::{RngExt, SeedableRng};
+
+    // Create random dataset and index structures.
+    fn create_data_and_index(rng: &mut StdRng) -> (Dataset<u16>, Vec<RowIndex<u32, SquaredLoss>>) {
+        let mut data =
+            create_test_dataset(/*columns*/ 16, /*rows*/ 1000, /*bins*/ 8);
+        let mut index = RowIndex::<u32, SquaredLoss>::new_array(data.rows());
+
+        for slice in data.slices_mut() {
+            for value in slice {
+                *value = rng.random_range(0..=8);
+            }
+        }
+        for (pos, item) in index.iter_mut().enumerate() {
+            let y = (pos % 2) as f32;
+            let y_pred = rng.random_range(0.0..=1.0);
+            *item = RowIndex::new(pos, SquaredLoss::derive(y, y_pred));
+        }
+        (data, index)
+    }
+
+    #[test]
+    fn random_sample() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let (data, mut index) = create_data_and_index(&mut rng);
+
+        let tree_options = BoostTreeOptions {
+            subsample: 0.1,
+            colsample_bytree: 0.75,
+            colsample_bylevel: 0.65,
+            colsample_bynode: 0.5,
+            max_depth: 3,
+            max_leaves: 6,
+            ..Default::default()
+        };
+        let node_options = BoostNodeOptions::default();
+
+        // Run the builder with subsampling enabled.
+        let mut builder = TreeBuilder::new(
+            &mut index,
+            &data,
+            &tree_options,
+            &node_options,
+            &mut rng,
+            false,
+        );
+
+        // Verify that the index is random before running.
+        let root = builder.get_next_batch().pop().unwrap();
+        let columns = Vec::from_iter(root.value.histogram.iter());
+        let mut rows = Vec::from_iter(root.value.index.iter().map(|x| x.as_usize()));
+        assert!(root == root);
+        builder.add_to_pool(root);
+
+        rows.sort();
+        let adjacent = rows.array_windows().filter(|[a, b]| *a + 1 == *b).count();
+        assert_eq!(rows.len(), 100);
+        assert_eq!(adjacent, 16);
+
+        // At each tree level, verify the histogram columns.
+        while builder.process() {
+            for item in builder.get_next_batch() {
+                if item.depth != tree_options.max_depth {
+                    let pool = &builder.columns_bylevel[item.depth];
+                    let columns = item.value.columns.as_ref().unwrap();
+                    assert_eq!(columns.len(), 4); // 16 columns * 0.75 * 0.65 * 0.5
+                    assert!(columns.iter().all(|c| pool.contains(c)));
+                }
+                builder.add_to_pool(item);
+            }
+        }
+
+        // Verify the columns selected for each tree level.
+        assert_eq!(columns, &[0, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14]);
+        assert_eq!(
+            builder.columns_bylevel,
+            vec![
+                vec![5, 7, 0, 13, 3, 14, 6, 11],
+                vec![0, 6, 13, 5, 14, 7, 4, 8],
+                vec![6, 14, 2, 13, 4, 7, 5, 3],
+            ]
+        );
+
+        // At least one column must be selected.
+        let tree_options = BoostTreeOptions {
+            colsample_bynode: 0.01,
+            max_depth: 3,
+            ..Default::default()
+        };
+        let tree = TreeBuilder::new(
+            &mut index,
+            &data,
+            &tree_options,
+            &node_options,
+            &mut rng,
+            false,
+        )
+        .execute();
+        assert_eq!(tree.iter().count(), 15);
+    }
+
+    #[test]
+    fn loss_guide() {
+        let mut rng = StdRng::seed_from_u64(0);
+        let (data, mut index) = create_data_and_index(&mut rng);
+
+        let tree_options = BoostTreeOptions {
+            loss_guide: true,
+            max_depth: 0,
+            max_leaves: 6,
+            ..Default::default()
+        };
+        let node_options = BoostNodeOptions::default();
+
+        // Construct and run the tree builder.
+        let tree = TreeBuilder::new(
+            &mut index,
+            &data,
+            &tree_options,
+            &node_options,
+            &mut rng,
+            true,
+        )
+        .execute();
+
+        // Verify the resulting tree.
+        assert_eq!(
+            tree.to_string(None),
+            concat!(
+                "0:[14 <= 5] yes=1,no=2,gain=1.8308164,cover=1000\n",
+                "    1:value=-0.011305538,cover=575\n",
+                "    2:[5 <= 2] yes=3,no=4,gain=1.399197,cover=425\n",
+                "        3:value=-0.015970366,cover=102\n",
+                "        4:[13 <= 7] yes=5,no=6,gain=1.6376567,cover=323\n",
+                "            5:[5 <= 6] yes=7,no=8,gain=2.3093631,cover=261\n",
+                "                7:[15 <= 3 | null] yes=9,no=10,gain=2.380442,cover=140\n",
+                "                    9:value=0.110347375,cover=54\n",
+                "                    10:value=0.029982187,cover=86\n",
+                "                8:value=0.0043913317,cover=121\n",
+                "            6:value=-0.019494265,cover=62",
+            )
+        );
+    }
+}

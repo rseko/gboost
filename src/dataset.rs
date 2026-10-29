@@ -290,7 +290,7 @@ fn sigmoid(y: f32) -> f32 {
 /// Build an empty dataset (used in tests).
 #[allow(unused)]
 pub(crate) fn create_test_dataset(columns: usize, rows: usize, bins: usize) -> Dataset<u16> {
-    let bins = (0..bins).map(|i| i as f32).collect::<Vec<_>>();
+    let bins = Vec::from_iter((0..bins).map(|i| i as f32));
     Dataset::<u16>::new(
         vec![Feature::linear(None, bins); columns],
         vec![vec![0; rows]; columns],
@@ -318,10 +318,7 @@ mod tests {
 
     #[test]
     fn create_dataset() {
-        let features = vec![
-            Feature::linear(None, vec![]),
-            Feature::onehot(None, vec![]),
-        ];
+        let features = vec![Feature::linear(None, vec![]), Feature::onehot(None, vec![])];
         let empty = Dataset::<u8>::new(features.clone(), vec![vec![]; 2], vec![]).unwrap();
         assert_eq!(empty.columns(), 2);
         assert_eq!(empty.rows(), 0);
