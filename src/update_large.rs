@@ -110,7 +110,7 @@ where
 
     // Mirror the same per-batch split for the row-index slice, so each batch
     // writes its derivatives into the matching `index` window.
-    let index_slices = index.chunks_mut(config.bits_per_batch).collect::<Vec<_>>();
+    let index_slices = Vec::from_iter(index.chunks_mut(config.bits_per_batch));
 
     // Create and size the prediction file for this step up front so the
     // output is a fixed-length, fully written artifact for all rows.
@@ -126,10 +126,7 @@ where
         // One deterministic seed per batch, so each worker re-derives its own
         // `StdRng` locally. With a fresh shuffle buffer per batch, each batch's
         // sampled rows are reproducible without shared mutable state.
-        let seeds = rng
-            .random_iter::<u64>()
-            .take(batch_count)
-            .collect::<Vec<_>>();
+        let seeds = Vec::from_iter(rng.random_iter::<u64>().take(batch_count));
 
         // Each batch runs concurrently with its own file handles and buffers,
         // performing the same seek/read/process/write cycle as the sequential
@@ -555,10 +552,7 @@ mod tests {
         // Verify the resulting dataset.
         assert_eq!(sum_inputs(&data.inputs()[0]), 5819437);
         assert_eq!(sum_inputs(&data.inputs()[1]), 5827921);
-        assert_eq!(
-            index.iter().map(|x| x.grad_hess().0).sum::<f32>(),
-            -22950.50
-        );
+        assert_eq!(index.iter().map(|x| x.grad_hess().0).sum::<f32>(), -22950.5);
 
         // Verify the resulting file.
         let mut predict = vec![0.0_f32; NUM_ROWS];

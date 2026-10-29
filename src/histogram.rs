@@ -145,25 +145,6 @@ impl Histogram {
         result
     }
 
-    /// Keep only the features listed in `columns`: every other feature is
-    /// collapsed to an empty span (zero bins). `data` is compacted in place
-    /// to hold only the kept features' bins, and the `splits` offsets are
-    /// rebased into the compacted layout; `splits` keeps its length, so
-    /// `get` can still be called with the original column ids.
-    pub fn compress(&mut self, columns: &HashSet<usize>) {
-        let (mut src, mut dst) = (0, 0);
-        for idx in 0..self.splits.len() - 1 {
-            let end = self.splits[idx + 1];
-            if columns.contains(&idx) {
-                self.data.copy_within(src..end, dst);
-                dst += end - src;
-            }
-            src = end;
-            self.splits[idx + 1] = dst;
-        }
-        self.data.truncate(dst);
-    }
-
     /// Mutable histogram data (internal).
     #[allow(unused)]
     pub(crate) fn data_mut(&mut self) -> &mut [Item] {
@@ -315,43 +296,19 @@ mod tests {
         let hist = Histogram::build(&data, Some(&columns), &index, /*initial*/ false, true);
         assert_almost_equal(hist.get(0), &[(0.6, 6.), (0.5, 5.), (0.4, 4.)]);
 
-        let hist_columns = hist.iter().collect::<Vec<_>>();
+        let hist_columns = Vec::from_iter(hist.iter());
         assert_eq!(hist_columns, vec![0, 2]);
-    }
-
-    #[test]
-    fn discard_columns() {
-        let hist = build_histogram(create_test_dataset(5, 10, 2), false);
-        assert_eq!(hist.splits, vec![0, 3, 6, 9, 12, 15]);
-
-        // Keep two columns.
-        let mut sub = hist.clone();
-        sub.compress(&HashSet::from([1, 3]));
-        assert_eq!(sub.splits, &[0, 0, 3, 3, 6, 6]);
-        assert_eq!(sub.get(0), &[]);
-        assert_eq!(sub.get(1), hist.get(1));
-
-        // Keep one column.
-        sub.compress(&HashSet::from([1]));
-        assert_eq!(sub.splits, &[0, 0, 3, 3, 3, 3]);
-        assert_eq!(sub.get(1), hist.get(1));
-        assert_eq!(sub.get(3), &[]);
-
-        // Keep zero columns.
-        sub.compress(&HashSet::new());
-        assert!(sub.data.is_empty());
-        assert_eq!(sub.splits, vec![0; 6]);
     }
 
     #[test]
     fn slice_ops() {
         let hist = build_histogram(create_test_dataset(3, 64, 2), false);
         let mut other = hist.clone();
-        other += &hist.data;
+        other += hist.data();
         for (a, b) in other.data.iter().zip(hist.data.iter()) {
             assert_eq!(*a, (b.0 * 2.0, b.1 * 2.0));
         }
-        other -= &hist.data;
-        assert_eq!(other.data, hist.data);
+        other -= hist.data();
+        assert_eq!(other.data(), hist.data());
     }
 }
