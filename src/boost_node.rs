@@ -400,7 +400,7 @@ mod tests {
 
     // Build test histogram: 3 columns, 5 rows, 3+1 bins.
     fn build_splittable() -> Splittable<'static, u32, SquaredLoss> {
-        let feature = Feature::linear("".into(), vec![1., 2., 3.]);
+        let feature = Feature::linear(None, vec![1., 2., 3.]);
         let mut histogram = Histogram::new(&vec![feature; 3], None);
 
         let (v0, v1, v2, v3) = ((0., 0.), (0.25, 1.), (0.5, 2.), (0.75, 3.));
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn onehot_simple() {
-        let features = vec![Feature::onehot("".into(), vec![]); 3];
+        let features = vec![Feature::onehot(None, vec![]); 3];
         let mut splittable = build_splittable();
         splittable.histogram.data_mut()[4].0 = -2.0;
         splittable.histogram.data_mut()[7].0 = -2.0;
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn split_linear() {
-        let data = build_data(Feature::linear("".into(), vec![1., 2., 3.]));
+        let data = build_data(Feature::linear(None, vec![1., 2., 3.]));
 
         let make_index = |n: usize| -> Vec<RowIndex<u32, SquaredLoss>> {
             (0..n)
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn split_onehot() {
-        let data = build_data(Feature::onehot("".into(), vec![1., 2., 3.]));
+        let data = build_data(Feature::onehot(None, vec![1., 2., 3.]));
 
         // Final split (no histograms).
         let splittable = Splittable {
