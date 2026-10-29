@@ -87,19 +87,19 @@ impl Histogram {
         initial: bool,
         parallel: bool,
     ) -> Self {
-        let mut result = Self::new(data.features(), columns);
-        assert!(!result.data.is_empty());
         assert!(data.rows() >= index.len());
 
-        if parallel {
-            const TASK_FACTOR: usize = 1024;
+        let mut result = Self::new(data.features(), columns);
+        if parallel && !result.data.is_empty() {
             // Calculate split-K batch size: rows are partitioned into
             // `batch_count` chunks, each folding into its own partial
             // histogram of `total_bins` cells, then summed into the result.
             // `batch_size` is the row count per chunk, heuristic-scaled
             // from the average bin count per contributing feature.
+            const TASK_FACTOR: usize = 1024;
+
             let total_bins = result.data.len();
-            let total_cols = columns.map_or(data.columns(), |c| c.len());
+            let total_cols = columns.map_or(data.columns(), |c| c.len()).max(1);
             let batch_size = total_bins.div_ceil(total_cols) * TASK_FACTOR;
             let batch_count = index.len().div_ceil(batch_size);
 
@@ -295,9 +295,11 @@ mod tests {
 
         let hist = Histogram::build(&data, Some(&columns), &index, /*initial*/ false, true);
         assert_almost_equal(hist.get(0), &[(0.6, 6.), (0.5, 5.), (0.4, 4.)]);
-
         let hist_columns = Vec::from_iter(hist.iter());
         assert_eq!(hist_columns, vec![0, 2]);
+
+        let empty = Histogram::build(&data, Some(&HashSet::new()), &index, false, true);
+        assert!(empty.data().is_empty());
     }
 
     #[test]
