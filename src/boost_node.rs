@@ -16,10 +16,11 @@ use crate::dataset::{Dataset, Feature, FeatureKind, IndexT, Objective, RowIndex}
 use crate::histogram::Histogram;
 use itertools::{Itertools, partition};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 /// Options controlling how a node is split.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoostNodeOptions {
     /// L1 regularization (alpha).
     pub reg_alpha: f64,
