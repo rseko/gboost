@@ -15,11 +15,12 @@ use crate::dataset::{Dataset, FeatureKind, IndexT, Objective, RowIndex};
 use crate::histogram::Histogram;
 use crate::tree::{Node, NodeKind, NodeSplit, Tree};
 use rand::{rngs::StdRng, seq::SliceRandom};
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Options controlling how a tree is built.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoostTreeOptions {
     /// Learning rate defines the update step size.
     pub learning_rate: f64,

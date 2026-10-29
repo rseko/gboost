@@ -8,21 +8,28 @@
 
 use crate::boost_node::BoostNodeOptions;
 use crate::boost_tree::BoostTreeOptions;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, to_value};
 use std::path::PathBuf;
 
 /// Top-level options: the booster, tree and node settings together.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Options {
     /// Booster-level settings (objective, scoring, offload, parallelism).
+    #[serde(flatten)]
     pub boost_options: BoosterOptions,
+
     /// Tree-level settings (subsampling, depth/leaf limits, pool policy).
+    #[serde(flatten)]
     pub tree_options: BoostTreeOptions,
+
     /// Node-level settings (regularization, split thresholds).
+    #[serde(flatten)]
     pub node_options: BoostNodeOptions,
 }
 
 /// Booster-level options shared across every tree in a run.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoosterOptions {
     /// The objective the booster optimizes.
     pub objective: ObjectiveKind,
@@ -52,7 +59,7 @@ impl Default for BoosterOptions {
 }
 
 /// The objective a booster minimizes.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ObjectiveKind {
     /// Binary cross-entropy (classification).
     LogLoss,
@@ -200,6 +207,48 @@ impl Options {
         self.node_options.allow_missing_splits = allow_missing_splits;
         self
     }
+
+    // ----- Serialization -------------------------------------------------------------------------
+
+    /// Build a portable JSON config object from these options.
+    ///
+    /// Two kinds of fields are intentionally omitted so the config stays
+    /// host- and version-independent:
+    /// - `boost_options.persist_path`: machine-local, never serialized. It
+    ///   must be re-supplied via `set_persist_path` after `from_json`.
+    /// - Any tree/node option equal to its `Default` value. The comparison
+    ///   is exact (bit-identical), so only true defaults are pruned.
+    ///
+    /// Every booster option other than `persist_path` is always present,
+    /// defaults included.
+    pub fn to_json(&self) -> Value {
+        let mut result = to_value(self).unwrap();
+        let result_map = result.as_object_mut().unwrap();
+        result_map.retain(|k, _| k != "persist_path");
+
+        let get_object = |v: Value| v.as_object().unwrap().clone();
+        let default_tree = get_object(to_value(BoostTreeOptions::default()).unwrap());
+        result_map.retain(|k, v| default_tree.get(k) != Some(v));
+
+        let default_node = get_object(to_value(BoostNodeOptions::default()).unwrap());
+        result_map.retain(|k, v| default_node.get(k) != Some(v));
+        result
+    }
+
+    /// Restore options from a config object produced by [`Self::to_json`].
+    ///
+    /// Any field absent from `value` (the pruned defaults and `persist_path`)
+    /// is filled in from [`Options::default`].
+    pub fn from_json(value: Value) -> serde_json::Result<Self> {
+        let mut result = to_value(Self::default()).unwrap();
+        let result_map = result.as_object_mut().unwrap();
+
+        let input = value
+            .as_object()
+            .ok_or_else(|| serde::de::Error::custom("expected a JSON object"))?;
+        result_map.extend(input.clone());
+        serde_json::from_value(result)
+    }
 }
 
 #[cfg(test)]
@@ -207,8 +256,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn set_all_options() {
-        let path = std::path::PathBuf::from("/tmp/gboost");
+    fn create_options() {
+        let path = std::path::PathBuf::from(".");
         let boost_options = BoosterOptions {
             objective: ObjectiveKind::LogLoss,
             base_score: 1.0,
@@ -269,5 +318,36 @@ mod tests {
             .set_tree_options(tree_options)
             .set_node_options(node_options);
         assert_eq!(actual_alt, actual);
+    }
+
+    #[test]
+    fn serialize_roundtrip() {
+        let options = Options::default()
+            .set_learning_rate(0.2)
+            .set_allow_missing_splits(true);
+
+        // Serialize booster fields and non-default tree/node options.
+        let json = serde_json::to_string(&options.to_json()).unwrap();
+        assert_eq!(
+            json,
+            concat!(
+                r#"{"objective":"SquaredLoss","base_score":0.0,"use_offload":false"#,
+                r#","parallel":true,"seed":0,"learning_rate":0.2,"allow_missing_splits":true}"#
+            )
+        );
+
+        // Deserialize and compare.
+        let value = serde_json::from_str(&json).unwrap();
+        let restored = Options::from_json(value).unwrap();
+        assert_eq!(restored, options);
+
+        let invalid = serde_json::from_str("null").unwrap();
+        assert!(Options::from_json(invalid).is_err());
+
+        // `persist_path` is intentionally never serialized, even when set.
+        let value = Options::default()
+            .set_persist_path(Some(PathBuf::from(".")))
+            .to_json();
+        assert!(value.get("persist_path").is_none());
     }
 }
