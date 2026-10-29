@@ -19,7 +19,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 /// Options controlling how a tree is built.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BoostTreeOptions {
     /// Learning rate defines the update step size.
     pub learning_rate: f64,

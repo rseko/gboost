@@ -19,7 +19,7 @@ use rayon::prelude::*;
 use std::collections::HashSet;
 
 /// Options controlling how a node is split.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BoostNodeOptions {
     /// L1 regularization (alpha).
     pub reg_alpha: f64,
