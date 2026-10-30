@@ -88,7 +88,7 @@ pub struct Dataset<T> {
     target: Vec<f32>,
 }
 
-impl<T> Dataset<T> {
+impl<T: Copy> Dataset<T> {
     /// Build a new dataset from its parts.
     pub fn new(features: Vec<Feature>, inputs: Vec<Vec<T>>, target: Vec<f32>) -> Result<Self> {
         if features.is_empty() {
@@ -147,14 +147,25 @@ impl<T> Dataset<T> {
         &mut self.target
     }
 
-    /// Get inputs as mutable reference.
-    #[allow(unused)]
-    pub(crate) fn inputs_mut(&mut self) -> &mut [Vec<T>] {
-        &mut self.inputs
+    /// Create an empty dataset.
+    pub fn empty(features: Vec<Feature>) -> Result<Self> {
+        let inputs = vec![Vec::new(); features.len()];
+        Self::new(features, inputs, vec![])
+    }
+
+    /// Resize every feature to `new_size` rows, padding with `value`. The target is
+    /// resized the same way (default `0.0`) if it already has rows or `target` is set.
+    pub fn resize(&mut self, new_size: usize, value: T, target: Option<f32>) {
+        for row in self.inputs.iter_mut() {
+            row.resize(new_size, value);
+        }
+        if !self.target.is_empty() || target.is_some() {
+            self.target.resize(new_size, target.unwrap_or(0.0));
+        }
     }
 }
 
-impl<T> std::fmt::Debug for Dataset<T> {
+impl<T: Copy> std::fmt::Debug for Dataset<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -319,7 +330,7 @@ mod tests {
     #[test]
     fn create_dataset() {
         let features = vec![Feature::linear(None, vec![]), Feature::onehot(None, vec![])];
-        let empty = Dataset::<u8>::new(features.clone(), vec![vec![]; 2], vec![]).unwrap();
+        let empty = Dataset::<u8>::empty(features.clone()).unwrap();
         assert_eq!(empty.columns(), 2);
         assert_eq!(empty.rows(), 0);
 
@@ -374,6 +385,20 @@ mod tests {
             bad_target.unwrap_err().to_string(),
             "target size does not match inputs"
         );
+    }
+
+    #[test]
+    fn resize_dataset() {
+        let features = vec![Feature::default(); 2];
+        let mut data = Dataset::empty(features).unwrap();
+        data.resize(4, 0, Some(0.0));
+        assert_eq!(data.rows(), 4);
+        assert_eq!(data.target().len(), 4);
+
+        data.resize(0, 0, None);
+        data.resize(8, 0, None);
+        assert_eq!(data.rows(), 8);
+        assert!(data.target().is_empty());
     }
 
     #[test]

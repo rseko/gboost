@@ -91,25 +91,39 @@ impl Histogram {
 
         let mut result = Self::new(data.features(), columns);
         if parallel && !result.data.is_empty() {
-            // Calculate split-K batch size: rows are partitioned into
-            // `batch_count` chunks, each folding into its own partial
-            // histogram of `total_bins` cells, then summed into the result.
-            // `batch_size` is the row count per chunk, heuristic-scaled
-            // from the average bin count per contributing feature.
-            const TASK_FACTOR: usize = 1024;
+            const BATCH_SIZE: usize = 1024;
+            let columns = columns.map_or(data.columns(), |c| c.len());
+            let batches = index.len().div_ceil(BATCH_SIZE);
+            let bins = result.data.len();
+            let threads = rayon::current_num_threads();
 
-            let total_bins = result.data.len();
-            let total_cols = columns.map_or(data.columns(), |c| c.len()).max(1);
-            let batch_size = total_bins.div_ceil(total_cols) * TASK_FACTOR;
-            let batch_count = index.len().div_ceil(batch_size);
+            // Choose a split-K factor: partition rows into `split` independent
+            // histograms built in parallel (see the `buffer` below) and merged
+            // later, trading an O(bins) duplication/merge cost for more
+            // parallel tasks.
+            //
+            // Candidates are powers of two up to the largest power of two
+            // dividing `threads` (never more partials than the pool can use,
+            // and always a clean power of two for chunking).
+            let cost_1 = index.len() * columns.div_ceil(threads);
+            let split = (0..=threads.trailing_zeros())
+                .map(|bit| 1 << bit)
+                .max_by_key(|split| {
+                    let batch_size = BATCH_SIZE * batches.div_ceil(*split);
+                    let tasks = index.len().div_ceil(batch_size) * columns;
+                    let cost_2 = batch_size * tasks.div_ceil(threads);
+                    cost_1 as isize - (cost_2 + bins * split) as isize
+                })
+                .unwrap();
 
-            if batch_count > 1 {
+            if split > 1 {
                 // Many row chunks: each fold runs in parallel into a private
                 // histogram inside a preallocated buffer (one per chunk), then
                 // the partials are summed into the shared result.
-                let mut buffer = vec![(0.0, 0.0); total_bins * batch_count];
+                let batch_size = BATCH_SIZE * batches.div_ceil(split);
+                let mut buffer = vec![(0.0, 0.0); bins * split];
                 let tasks = buffer
-                    .chunks_mut(total_bins)
+                    .chunks_mut(bins)
                     .zip(index.chunks(batch_size))
                     .flat_map(|(hist, src)| {
                         split_parts(hist, &result.splits)
@@ -122,7 +136,7 @@ impl Histogram {
                 tasks.into_par_iter().for_each(|((slice, row), part)| {
                     build_line(slice, row, part, initial);
                 });
-                for hist in buffer.chunks(total_bins) {
+                for hist in buffer.chunks(bins) {
                     result += hist;
                 }
             } else {
