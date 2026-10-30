@@ -501,9 +501,7 @@ mod tests {
         // Truncate the dataset.
         let sampled_rows = NUM_ROWS * NUM_SAMPLES / BATCH;
         let mut index = RowIndex::<u32, SquaredLoss>::new_array(sampled_rows);
-        for row in data.inputs_mut() {
-            row.truncate(sampled_rows);
-        }
+        data.resize(sampled_rows, 0, None);
 
         // Run the first update.
         let mut config = UpdateConfig {
