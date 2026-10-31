@@ -60,7 +60,7 @@ impl Default for BoostTreeOptions {
 /// Owns the work queue of unsplit nodes (`pool`), accumulates the finished
 /// nodes in `result_nodes` keyed by node index, and applies the subsampling
 /// and leaf/depth budgets from `tree_options`.
-pub struct TreeBuilder<'a, T: Copy + Into<usize> + Sync, I: IndexT, O: Objective> {
+pub struct TreeBuilder<'a, T, I, O> {
     /// Queue of nodes still waiting for a split attempt.
     pool: BuilderPool<'a, I, O>,
     /// The dataset the tree is grown on.
@@ -403,7 +403,7 @@ fn get_sample_size(total: usize, ratio: f64) -> usize {
 }
 
 /// One entry in the work queue: a node's state plus its bookkeeping.
-struct IndexedSplittable<'a, I: IndexT, O: Objective> {
+struct IndexedSplittable<'a, I, O> {
     /// The node's index in the finished tree (allocated by the builder).
     index: usize,
     /// Distance of the node from the root.
@@ -423,7 +423,7 @@ type PartitionedResult<'a, I, O> = (
 );
 
 /// The work queue policy.
-enum BuilderPool<'a, I: IndexT, O: Objective> {
+enum BuilderPool<'a, I, O> {
     /// Level-order queue: each batch is a whole level.
     DepthWise(Vec<IndexedSplittable<'a, I, O>>),
     /// Best-gain-first heap: each batch is a single node.
@@ -431,25 +431,25 @@ enum BuilderPool<'a, I: IndexT, O: Objective> {
 }
 
 // Heap ordering so that `pop` returns the highest-gain node first.
-impl<'a, I: IndexT, O: Objective> PartialOrd for IndexedSplittable<'a, I, O> {
+impl<'a, I, O> PartialOrd for IndexedSplittable<'a, I, O> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<'a, I: IndexT, O: Objective> Ord for IndexedSplittable<'a, I, O> {
+impl<'a, I, O> Ord for IndexedSplittable<'a, I, O> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.value.stats.gain.total_cmp(&other.value.stats.gain)
     }
 }
 
-impl<'a, I: IndexT, O: Objective> PartialEq for IndexedSplittable<'a, I, O> {
+impl<'a, I, O> PartialEq for IndexedSplittable<'a, I, O> {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal
     }
 }
 
-impl<'a, I: IndexT, O: Objective> Eq for IndexedSplittable<'a, I, O> {}
+impl<'a, I, O> Eq for IndexedSplittable<'a, I, O> {}
 
 #[cfg(test)]
 mod tests {

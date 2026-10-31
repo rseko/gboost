@@ -31,18 +31,18 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
     assert_eq!(index.len(), data.rows());
 
     if parallel {
-        // Rows are partitioned into `TASK_SIZE` chunks processed concurrently;
+        // Rows are partitioned into `BATCH_SIZE` chunks processed concurrently;
         // each chunk gets its base offset so global row positions stay correct.
-        const TASK_SIZE: usize = 1024;
-        let target_chunks = data.target().par_chunks(TASK_SIZE);
-        let predict_chunks = predict.par_chunks_mut(TASK_SIZE);
-        let index_chunks = index.par_chunks_mut(TASK_SIZE);
+        const BATCH_SIZE: usize = 1024;
+        let target_chunks = data.target().par_chunks(BATCH_SIZE);
+        let predict_chunks = predict.par_chunks_mut(BATCH_SIZE);
+        let index_chunks = index.par_chunks_mut(BATCH_SIZE);
 
         index_chunks
             .zip(target_chunks.zip(predict_chunks))
             .enumerate()
             .for_each(|(idx, (dst, (y, y_pred)))| {
-                let offset = idx * TASK_SIZE;
+                let offset = idx * BATCH_SIZE;
                 if let Some(tree) = tree {
                     update_predict_slice(y_pred, tree, data.inputs(), offset);
                 }

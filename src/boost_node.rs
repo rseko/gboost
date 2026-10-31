@@ -48,7 +48,7 @@ impl Default for BoostNodeOptions {
 
 /// One node's state: the rows that reach it, the histogram accumulated over
 /// those rows (per bin of each feature), and the node's own statistics.
-pub(crate) struct Splittable<'a, I: IndexT, O: Objective> {
+pub(crate) struct Splittable<'a, I, O> {
     /// The rows routed to this node, in arbitrary order.
     pub index: &'a mut [RowIndex<I, O>],
     /// Per-(feature, bin) gradient/hessian sums over `index`.

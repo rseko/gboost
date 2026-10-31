@@ -178,7 +178,7 @@ impl<T: Copy> std::fmt::Debug for Dataset<T> {
 
 /// A single row of the dataset with the per-iteration loss derivatives.
 #[derive(Clone, Copy)]
-pub struct RowIndex<I: IndexT, O: Objective> {
+pub struct RowIndex<I, O> {
     /// Row position, dataset-wide or sampled-subset-relative.
     index: I,
     /// Stored gradient/hessian values.

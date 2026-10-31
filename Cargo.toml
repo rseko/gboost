@@ -9,6 +9,7 @@ repository = "https://github.com/rseko/gboost"
 [dependencies]
 anyhow = "1.0"
 itertools = "0.15"
+num-traits = "0.2"
 rand = "0.10"
 rayon = "1.12"
 serde = { version = "1.0", features = ["derive"] }
@@ -17,6 +18,7 @@ zerocopy = { version = "0.8", features = ["std"] }
 
 [dev-dependencies]
 criterion = "0.8"
+half = { version = "2.7", features = ["num-traits"] }
 tempfile = "3"
 
 [[bench]]
