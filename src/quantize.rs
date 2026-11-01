@@ -22,8 +22,23 @@ pub struct Quantizer<T> {
 
 impl<T> Quantizer<T>
 where
-    T: Float + FromBytes + Immutable + IntoBytes + Send,
+    T: Float + FromBytes + Immutable + IntoBytes,
 {
+    /// Maps each value of `data` to the index of the bin (the range
+    /// between consecutive boundaries, see `bins`) it falls in. Bin
+    /// indices are 1-based; NaNs get the sentinel bin `0`.
+    pub fn quantize<I: PrimInt>(&self, data: &[T]) -> Vec<I> {
+        let convert = |value: &T| -> I {
+            if !value.is_nan() {
+                let pos = self.bins.partition_point(|x| value > x) + 1;
+                I::from(pos.min(self.bins.len())).unwrap_or(I::zero())
+            } else {
+                I::zero()
+            }
+        };
+        data.iter().map(convert).collect()
+    }
+
     /// Fit up to `max_bins` boundaries from `data`.
     ///
     /// NaNs are never treated as values. Dispatches to the histogram
@@ -255,6 +270,26 @@ where
 mod tests {
     use super::*;
     use half::f16;
+
+    #[test]
+    fn quantize() {
+        let test = Quantizer::<f32> {
+            bins: vec![1.0, 2.0, 3.0],
+        };
+        assert_eq!(
+            test.quantize::<u8>(&[
+                f32::nan(),
+                f32::neg_infinity(),
+                1.0,
+                1.5,
+                2.0,
+                2.5,
+                3.0,
+                f32::infinity()
+            ]),
+            vec![0, 1, 1, 2, 2, 3, 3, 3]
+        );
+    }
 
     #[test]
     fn empty_data() {
