@@ -31,7 +31,7 @@ pub struct TreeIter<'a> {
 }
 
 /// A tree node: either an internal split or a leaf value.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Node {
     /// Whether the node is a split or a leaf, and its payload.
     pub kind: NodeKind,
@@ -42,7 +42,7 @@ pub struct Node {
 }
 
 /// The kind of payload a [`Node`] carries.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum NodeKind {
     /// Internal node: branch on a feature bin.
     Split(NodeSplit),
@@ -51,7 +51,7 @@ pub enum NodeKind {
 }
 
 /// A split condition: route a row left or right based on its bin for one feature.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NodeSplit {
     /// Which feature column this split tests.
     pub feature_id: usize,
@@ -225,6 +225,7 @@ impl NodeSplit {
     /// Uses the feature's name and threshold when `feature` is provided,
     /// otherwise falls back to the raw feature/bin ids.
     pub fn to_string(&self, feature: Option<&Feature>) -> String {
+        let name = feature.map_or_else(|| self.feature_id.to_string(), |f| f.name().into());
         if self.bin_id != 0 {
             let is_valid = |f: &Feature| (f.kind() == FeatureKind::Linear) == self.is_range;
             let pred = if feature.is_none_or(is_valid) {
@@ -235,14 +236,13 @@ impl NodeSplit {
             let null = if self.with_missing { " | null" } else { "" };
             match feature {
                 Some(info) => format!(
-                    "{} {pred} {}{null}",
-                    info.name(),
+                    "{name} {pred} {}{null}",
                     info.bins().get(self.bin_id - 1).unwrap_or(&f32::NAN),
                 ),
-                None => format!("{} {pred} {}{null}", self.feature_id, self.bin_id),
+                None => format!("{name} {pred} {}{null}", self.bin_id),
             }
         } else {
-            "is null".into()
+            format!("{name} is null")
         }
     }
 }
@@ -364,7 +364,7 @@ mod tests {
         update_root(&mut tree, |split| {
             split.bin_id = 0;
         });
-        assert!(format!("{tree}").starts_with("0:[is null]"));
+        assert!(format!("{tree}").starts_with("0:[0 is null]"));
     }
 
     #[test]

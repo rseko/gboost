@@ -23,7 +23,7 @@ pub enum FeatureKind {
 }
 
 /// Feature descriptor defines the name, kind and original domain thresholds.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Feature {
     /// Original column name from the source data.
     name: Option<String>,
