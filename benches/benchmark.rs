@@ -1,4 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
+use half::f16;
 use rand::{Rng, RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::time::Duration;
 
@@ -6,6 +7,7 @@ use gboost::boost_node::BoostNodeOptions;
 use gboost::boost_tree::{BoostTreeOptions, TreeBuilder};
 use gboost::dataset::{Dataset, Feature, IndexT, Objective, RowIndex, SquaredLoss as Loss};
 use gboost::histogram::Histogram;
+use gboost::quantize::{QuantFloat, Quantizer};
 use gboost::tree::{Node, NodeSplit, Tree};
 use gboost::update_small::update_small;
 
@@ -105,12 +107,36 @@ fn bench_index64(c: &mut Criterion) {
     bench_main::<u64>(c, "u64/");
 }
 
+fn bench_quant<T: QuantFloat>(c: &mut Criterion, prefix: &str) {
+    let name = |s: &str| String::from(prefix) + s;
+    let mut rng = StdRng::seed_from_u64(0);
+
+    let data = (0..NUM_ROWS)
+        .map(|_| T::from(rng.random_range(-1.0..1.0)).unwrap())
+        .collect::<Vec<T>>();
+
+    c.bench_function(&name("bins:1"), |b| {
+        b.iter(|| Quantizer::fit_from(&data, NUM_BINS));
+    });
+    c.bench_function(&name("quantize:1"), |b| {
+        b.iter(|| Quantizer::quantize_all::<u8>(&[&data], NUM_BINS, false));
+    });
+}
+
+fn bench_float16(c: &mut Criterion) {
+    bench_quant::<f16>(c, "f16/");
+}
+
+fn bench_float32(c: &mut Criterion) {
+    bench_quant::<f32>(c, "f32/");
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .sample_size(10)
         .measurement_time(Duration::from_secs(2))
         .warm_up_time(Duration::from_millis(100));
-    targets = bench_index32, bench_index64
+    targets = bench_index32, bench_index64, bench_float16, bench_float32
 }
 criterion_main!(benches);

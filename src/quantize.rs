@@ -28,6 +28,10 @@ pub fn quantize<F: Float, I: PrimInt>(value: &F, bins: &[F]) -> I {
     }
 }
 
+/// A floating-point type suitable for quantization.
+pub trait QuantFloat: Float + FromBytes + Immutable + IntoBytes + Send + Sync {}
+impl<T: Float + FromBytes + Immutable + IntoBytes + Send + Sync> QuantFloat for T {}
+
 /// Bin-boundary fitting namespace: fit thresholds from raw values and map
 /// values to their 1-based bin index among them.
 ///
@@ -36,10 +40,7 @@ pub fn quantize<F: Float, I: PrimInt>(value: &F, bins: &[F]) -> I {
 /// usable values the single bin is positive infinity.
 pub struct Quantizer<T>(std::marker::PhantomData<T>);
 
-impl<T> Quantizer<T>
-where
-    T: Float + FromBytes + Immutable + IntoBytes + Send + Sync,
-{
+impl<T: QuantFloat> Quantizer<T> {
     /// Fit a quantizer per feature column and map each value to its bin
     /// index. Returns `(quantized, bins)`, both in column order; `quantized`
     /// is one `Vec<I>` per column (1-based, NaN -> 0), `bins` the fitted

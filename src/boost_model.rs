@@ -12,7 +12,7 @@ use crate::boost_tree::TreeBuilder;
 use crate::dataset::{Dataset, Feature, FeatureKind, IndexT, Objective, RowIndex};
 use crate::options::Options;
 use crate::parser::{parse_model, parse_trees};
-use crate::quantize::{Quantizer, quantize};
+use crate::quantize::{QuantFloat, Quantizer, quantize};
 use crate::tree::{NodeKind, Tree};
 use crate::update_large::{
     BATCH, FILENAME_INPUT, FILENAME_TARGET, UpdateConfig, sanitize_name, update_large,
@@ -213,15 +213,12 @@ where
     /// starts at `base_score` for every row, the per-row index is seeded by
     /// one tree-less update, and any persisted model file is replayed so a
     /// saved booster can be reinitialized and trained further.
-    pub fn init_small<F>(
+    pub fn init_small<F: QuantFloat>(
         options: Options,
         inputs: &[&[F]],
         target: &[f32],
         features: Option<Vec<Feature>>,
-    ) -> BoostResult<Self>
-    where
-        F: Float + FromBytes + Immutable + IntoBytes + Send + Sync,
-    {
+    ) -> BoostResult<Self> {
         // Fit one quantizer per column: the quantized bin indices become the
         // dataset inputs and the fitted boundaries replace the feature bins.
         let parallel = options.boost_options.parallel;
@@ -400,7 +397,7 @@ impl ModelInit {
     ) -> Result<Vec<F>>
     where
         T: PrimInt + Immutable + IntoBytes,
-        F: Float + FromBytes + Immutable + IntoBytes + Send + Sync,
+        F: QuantFloat,
     {
         // Special characters in the name are mapped to `_` so the file
         // extension stays portable.
