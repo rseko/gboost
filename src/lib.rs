@@ -1,5 +1,6 @@
 //! Gradient boosting library.
 
+pub mod boost_model;
 pub mod boost_node;
 pub mod boost_tree;
 pub mod dataset;

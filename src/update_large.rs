@@ -11,11 +11,10 @@
 
 use crate::dataset::{Dataset, IndexT, Objective, RowIndex};
 use crate::tree::Tree;
-use anyhow::Result;
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Result, Seek, SeekFrom, Write};
 use std::path::Path;
 use zerocopy::{FromBytes, IntoBytes};
 
@@ -115,11 +114,7 @@ where
     // Create and size the prediction file for this step up front so the
     // output is a fixed-length, fully written artifact for all rows.
     let suffix = (config.train_step + 1).to_string();
-    let output = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(path.join(FILENAME_PREDICT).with_extension(suffix))?;
+    let output = File::create(path.join(FILENAME_PREDICT).with_extension(suffix))?;
     output.set_len((config.total_rows * std::mem::size_of::<f32>()) as u64)?;
 
     if parallel {
@@ -299,23 +294,16 @@ impl UpdateFiles {
             .iter()
             .map(|name| {
                 let name = sanitize_name(name);
-                OpenOptions::new()
-                    .read(true)
-                    .open(path.join(FILENAME_INPUT).with_extension(&name))
+                File::open(path.join(FILENAME_INPUT).with_extension(&name))
             })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let target = OpenOptions::new()
-            .read(true)
-            .open(path.join(FILENAME_TARGET))?;
+            .collect::<Result<Vec<_>>>()?;
+        let target = File::open(path.join(FILENAME_TARGET))?;
 
         let predict = if train_step > 0 {
             let suffix = train_step.to_string();
-            Some(
-                OpenOptions::new()
-                    .read(true)
-                    .open(path.join(FILENAME_PREDICT).with_extension(suffix))?,
-            )
+            Some(File::open(
+                path.join(FILENAME_PREDICT).with_extension(suffix),
+            )?)
         } else {
             None
         };
@@ -473,20 +461,11 @@ mod tests {
     /// Write dataset to temp files.
     fn write_dataset(path: &Path, data: &Dataset<u8>) {
         for (feature, row) in data.features().iter().zip(data.inputs()) {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(path.join(FILENAME_INPUT).with_extension(feature.name()))
-                .unwrap();
+            let mut file =
+                File::create(path.join(FILENAME_INPUT).with_extension(feature.name())).unwrap();
             file.write_all(row.as_bytes()).unwrap();
         }
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path.join(FILENAME_TARGET))
-            .unwrap();
+        let mut file = File::create(path.join(FILENAME_TARGET)).unwrap();
         file.write_all(data.target().as_bytes()).unwrap();
     }
 
@@ -554,10 +533,8 @@ mod tests {
 
         // Verify the resulting file.
         let mut predict = vec![0.0_f32; NUM_ROWS];
-        let mut file = OpenOptions::new()
-            .read(true)
-            .open(temp_dir.path().join(FILENAME_PREDICT).with_extension("2"))
-            .unwrap();
+        let mut file =
+            File::open(temp_dir.path().join(FILENAME_PREDICT).with_extension("2")).unwrap();
         file.read_exact(predict.as_mut_bytes()).unwrap();
 
         assert_eq!(predict[NUM_ROWS - 3..], [0.25, 0.75, 0.25]);

@@ -20,17 +20,17 @@ pub fn parse_model(text: &str) -> Result<(Vec<Feature>, Vec<Tree>)> {
         .ok_or_else(|| anyhow!("invalid model"))?;
     let trees_offset = features_block.lines().count() + 2;
 
-    let features = parse_features(features_block)?;
+    let features = parse_features(features_block, 1)?;
     let trees = parse_trees(trees_block, &features, trees_offset)?;
     Ok((features, trees))
 }
 
 /// Parse the feature header block: one line per feature, `//` comments skipped.
-fn parse_features(text: &str) -> Result<Vec<Feature>> {
+pub fn parse_features(text: &str, offset: usize) -> Result<Vec<Feature>> {
     text.lines()
         .enumerate()
         // 1-indexed line numbers so errors point at the right source line.
-        .map(|(i, s)| (i + 1, s.trim()))
+        .map(|(i, s)| (offset + i, s.trim()))
         .filter(|(_, s)| !s.starts_with("//"))
         .map(|(line, s)| parse_feature(s).map_err(|e| e.context(line)))
         .collect()
@@ -62,7 +62,7 @@ fn parse_feature(text: &str) -> Result<Feature> {
 }
 
 /// Parse every blank-line-separated tree in the trees block.
-fn parse_trees(text: &str, features: &[Feature], offset: usize) -> Result<Vec<Tree>> {
+pub fn parse_trees(text: &str, features: &[Feature], offset: usize) -> Result<Vec<Tree>> {
     text.split("\n\n")
         // Track a running line counter so each tree reports its own start line.
         .scan(offset, |line, chunk| {
@@ -70,7 +70,7 @@ fn parse_trees(text: &str, features: &[Feature], offset: usize) -> Result<Vec<Tr
             *line += chunk.lines().count() + 1;
             Some((chunk, start))
         })
-        .map(|(chunk, start)| parse_tree(chunk.trim(), features, start))
+        .map(|(chunk, start)| parse_tree(chunk, features, start))
         .collect()
 }
 

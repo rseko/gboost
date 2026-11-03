@@ -35,10 +35,10 @@ pub struct BoosterOptions {
     pub objective: ObjectiveKind,
     /// The initial constant prediction before any tree is added.
     pub base_score: f32,
+    /// Maximum number of bins for quantization.
+    pub max_bins: u16,
     /// Where to persist large-dataset artifacts, if offloading is used.
     pub persist_path: Option<PathBuf>,
-    /// Whether the large (on-disk) update path is used.
-    pub use_offload: bool,
     /// Whether the parallel execution paths are enabled.
     pub parallel: bool,
     /// Seed for all deterministically reproducible random draws.
@@ -50,8 +50,8 @@ impl Default for BoosterOptions {
         Self {
             objective: ObjectiveKind::SquaredLoss,
             base_score: 0.0,
+            max_bins: 255,
             persist_path: None,
-            use_offload: false,
             parallel: true,
             seed: 0,
         }
@@ -102,15 +102,15 @@ impl Options {
         self
     }
 
-    /// Set the on-disk artifact path (or `None` to disable persistence).
-    pub fn set_persist_path(mut self, persist_path: Option<PathBuf>) -> Self {
-        self.boost_options.persist_path = persist_path;
+    /// Set the maximum number of bits for quantization.
+    pub fn set_max_bins(mut self, max_bins: u16) -> Self {
+        self.boost_options.max_bins = max_bins;
         self
     }
 
-    /// Set whether the large on-disk update path is used.
-    pub fn set_use_offload(mut self, use_offload: bool) -> Self {
-        self.boost_options.use_offload = use_offload;
+    /// Set the on-disk artifact path (or `None` to disable persistence).
+    pub fn set_persist_path(mut self, persist_path: Option<PathBuf>) -> Self {
+        self.boost_options.persist_path = persist_path;
         self
     }
 
@@ -261,8 +261,8 @@ mod tests {
         let boost_options = BoosterOptions {
             objective: ObjectiveKind::LogLoss,
             base_score: 1.0,
+            max_bins: 65535,
             persist_path: Some(path.clone()),
-            use_offload: true,
             parallel: false,
             seed: 42,
         };
@@ -287,8 +287,8 @@ mod tests {
         let actual = Options::default()
             .set_objective(ObjectiveKind::LogLoss)
             .set_base_score(1.0)
+            .set_max_bins(65535)
             .set_persist_path(Some(path.clone()))
-            .set_use_offload(true)
             .set_parallel(false)
             .set_seed(42)
             .set_learning_rate(0.1)
@@ -331,8 +331,8 @@ mod tests {
         assert_eq!(
             json,
             concat!(
-                r#"{"objective":"SquaredLoss","base_score":0.0,"use_offload":false"#,
-                r#","parallel":true,"seed":0,"learning_rate":0.2,"allow_missing_splits":true}"#
+                r#"{"objective":"SquaredLoss","base_score":0.0,"max_bins":255,"parallel":true"#,
+                r#","seed":0,"learning_rate":0.2,"allow_missing_splits":true}"#
             )
         );
 

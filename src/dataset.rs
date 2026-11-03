@@ -36,22 +36,19 @@ pub struct Feature {
 }
 
 impl Feature {
+    /// Build a new feature.
+    pub fn new(name: Option<String>, kind: FeatureKind, bins: Vec<f32>) -> Self {
+        Self { name, kind, bins }
+    }
+
     /// Build a feature with `FeatureKind::OneHot`.
     pub fn onehot(name: Option<String>, bins: Vec<f32>) -> Self {
-        Self {
-            kind: FeatureKind::OneHot,
-            name,
-            bins,
-        }
+        Self::new(name, FeatureKind::OneHot, bins)
     }
 
     /// Build a feature with `FeatureKind::Linear`.
     pub fn linear(name: Option<String>, bins: Vec<f32>) -> Self {
-        Self {
-            kind: FeatureKind::Linear,
-            name,
-            bins,
-        }
+        Self::new(name, FeatureKind::Linear, bins)
     }
 
     /// Get feature name.

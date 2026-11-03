@@ -9,6 +9,7 @@
 //!   or samples them evenly by rank.
 
 use num_traits::{Float, PrimInt};
+use rayon::prelude::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 /// Sorted bin boundaries fitted from a batch of raw feature values.
@@ -22,8 +23,29 @@ pub struct Quantizer<T> {
 
 impl<T> Quantizer<T>
 where
-    T: Float + FromBytes + Immutable + IntoBytes,
+    T: Float + FromBytes + Immutable + IntoBytes + Send + Sync,
 {
+    /// Fit a quantizer per feature column and map each value to its bin
+    /// index. Returns `(quantized, bins)`, both in column order; `quantized`
+    /// is one `Vec<I>` per column (1-based, NaN -> 0), `bins` the fitted
+    /// boundaries that produced them.
+    pub fn quantize_all<I: PrimInt + Send>(
+        data: &[&[T]],
+        max_bins: usize,
+        parallel: bool,
+    ) -> (Vec<Vec<I>>, Vec<Vec<T>>) {
+        let quantize = |row: &&[T]| {
+            let inst = Quantizer::fit_from(row, max_bins);
+            let data = inst.quantize(row);
+            (data, inst.bins)
+        };
+        if parallel {
+            data.par_iter().map(quantize).unzip()
+        } else {
+            data.iter().map(quantize).unzip()
+        }
+    }
+
     /// Maps each value of `data` to the index of the bin (the range
     /// between consecutive boundaries, see `bins`) it falls in. Bin
     /// indices are 1-based; NaNs get the sentinel bin `0`.
@@ -289,6 +311,21 @@ mod tests {
             ]),
             vec![0, 1, 1, 2, 2, 3, 3, 3]
         );
+    }
+
+    #[test]
+    fn quantize_all() {
+        let col1 = [f32::NAN, 1.0, 1.5, 2.0, 2.5, 3.0, f32::INFINITY];
+        let col2 = [f32::NEG_INFINITY, -1.0, 0.0, 1.0];
+        let data: Vec<&[f32]> = vec![&col1, &col2];
+
+        for parallel in [false, true] {
+            let (actual, bins) = Quantizer::quantize_all::<u8>(&data, 3, parallel);
+            assert_eq!(actual[0], vec![0, 1, 1, 2, 2, 3, 3]);
+            assert_eq!(bins[0], vec![1.5, 2.5, f32::INFINITY]);
+            assert_eq!(actual[1], vec![1, 2, 2, 3]);
+            assert_eq!(bins[1], vec![f32::NEG_INFINITY, 0.0, 1.0]);
+        }
     }
 
     #[test]
