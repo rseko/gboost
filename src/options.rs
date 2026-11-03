@@ -102,7 +102,7 @@ impl Options {
         self
     }
 
-    /// Set the maximum number of bits for quantization.
+    /// Set the maximum number of bins for quantization.
     pub fn set_max_bins(mut self, max_bins: u16) -> Self {
         self.boost_options.max_bins = max_bins;
         self

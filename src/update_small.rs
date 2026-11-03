@@ -16,7 +16,7 @@ use rayon::prelude::*;
 /// rewritten with its position and the objective's gradient/hessian at
 /// (`target`, `predict`).
 ///
-/// `parallel` runs both updates over `TASK_SIZE`-row chunks via rayon; rows
+/// `parallel` runs both updates over `BATCH_SIZE`-row chunks via rayon; rows
 /// within and across chunks are still processed independently, so results
 /// are identical to the sequential path.
 pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
@@ -26,7 +26,6 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
     tree: Option<&Tree>,
     parallel: bool,
 ) {
-    assert!(!data.target().is_empty());
     assert_eq!(predict.len(), data.rows());
     assert_eq!(index.len(), data.rows());
 

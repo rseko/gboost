@@ -63,6 +63,9 @@ fn parse_feature(text: &str) -> Result<Feature> {
 
 /// Parse every blank-line-separated tree in the trees block.
 pub fn parse_trees(text: &str, features: &[Feature], offset: usize) -> Result<Vec<Tree>> {
+    if text.is_empty() {
+        return Ok(vec![]);
+    }
     text.split("\n\n")
         // Track a running line counter so each tree reports its own start line.
         .scan(offset, |line, chunk| {
@@ -170,7 +173,7 @@ fn parse_predicate(text: &str, features: &[Feature]) -> Result<(usize, usize)> {
         .iter()
         .position(|f| f.name() == parts[0])
         .ok_or_else(|| anyhow!("invalid predicate name"))?;
-    // `name is none` tests for a missing value (bin id 0).
+    // `name is null` tests for a missing value (bin id 0).
     if parts[1..] == ["is", "null"] {
         return Ok((feature_id, 0));
     }
@@ -274,6 +277,13 @@ mod tests {
 
         let (_, trees) = parse_model(&example("name == 1 | null")).unwrap();
         assert_eq!(trees[0].get(0), &example_root(0, 1, true));
+    }
+
+    #[test]
+    fn parse_no_trees() {
+        let content = example("").split_once("// [trees]").unwrap().0.to_owned();
+        let (_, trees) = parse_model(&content).unwrap();
+        assert!(trees.is_empty());
     }
 
     #[test]

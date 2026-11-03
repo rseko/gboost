@@ -36,7 +36,7 @@ pub fn sanitize_name(name: &str) -> String {
 pub const BATCH: usize = 65536;
 
 /// Parameters controlling the incremental update pass.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UpdateConfig {
     /// Previous boosting step, if any; its on-disk artifact is the base prediction.
     pub train_step: usize,
@@ -113,9 +113,11 @@ where
 
     // Create and size the prediction file for this step up front so the
     // output is a fixed-length, fully written artifact for all rows.
-    let suffix = (config.train_step + 1).to_string();
-    let output = File::create(path.join(FILENAME_PREDICT).with_extension(suffix))?;
-    output.set_len((config.total_rows * std::mem::size_of::<f32>()) as u64)?;
+    if config.train_step > 0 {
+        let suffix = config.train_step.to_string();
+        let file = File::create(path.join(FILENAME_PREDICT).with_extension(suffix))?;
+        file.set_len((config.total_rows * std::mem::size_of::<f32>()) as u64)?;
+    }
 
     if parallel {
         // One deterministic seed per batch, so each worker re-derives its own
@@ -160,7 +162,7 @@ where
                         files.seek::<T>(idx * BATCH)?;
                         files.read(buffers, read_size, config.initial)?;
                         process_batch(buffers, &mut inputs, index, tree, &mask, offset);
-                        files.output.write_all(buffers.predict.as_bytes())?;
+                        files.write(&buffers.predict)?;
                     } else if let Some(error) = error.take() {
                         return Err(error);
                     }
@@ -196,7 +198,7 @@ where
             // updated predictions out at this batch's slot in `boost.<step>`.
             files.read(&mut buffers, read_size, config.initial)?;
             process_batch(&mut buffers, &mut inputs, index, tree, &mask, offset);
-            files.output.write_all(buffers.predict.as_bytes())?;
+            files.write(&buffers.predict)?;
         }
         Ok(())
     }
@@ -280,15 +282,15 @@ struct UpdateFiles {
     /// Previous step's predictions; `None` on the first step.
     predict: Option<File>,
     /// Current step's predictions file, being written.
-    output: File,
+    output: Option<File>,
 }
 
 impl UpdateFiles {
     /// Open all on-disk handles for a dataset under `path`. Each feature is
     /// read from `feature.<name>` (special chars in the name are replaced with `_`),
     /// the target from `target`, the previous step's predictions from
-    /// `boost.<train_step>` when present, and the current step's output file
-    /// `boost.<train_step + 1>` (step 0 on the first pass).
+    /// `boost.<train_step - 1>` when present, and the current step's output file
+    /// `boost.<train_step>` (step 0 on the first pass).
     fn open(path: &Path, names: &[String], train_step: usize) -> Result<Self> {
         let input = names
             .iter()
@@ -299,19 +301,23 @@ impl UpdateFiles {
             .collect::<Result<Vec<_>>>()?;
         let target = File::open(path.join(FILENAME_TARGET))?;
 
-        let predict = if train_step > 0 {
-            let suffix = train_step.to_string();
-            Some(File::open(
-                path.join(FILENAME_PREDICT).with_extension(suffix),
-            )?)
+        let predict = if train_step > 1 {
+            let filename = path
+                .join(FILENAME_PREDICT)
+                .with_extension((train_step - 1).to_string());
+            Some(File::open(filename)?)
         } else {
             None
         };
 
-        let suffix = (train_step + 1).to_string();
-        let output = OpenOptions::new()
-            .write(true)
-            .open(path.join(FILENAME_PREDICT).with_extension(suffix))?;
+        let output = if train_step > 0 {
+            let filename = path
+                .join(FILENAME_PREDICT)
+                .with_extension(train_step.to_string());
+            Some(OpenOptions::new().write(true).open(filename)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             input,
@@ -332,10 +338,12 @@ impl UpdateFiles {
 
         let position = (offset * std::mem::size_of::<f32>()) as u64;
         self.target.seek(SeekFrom::Start(position))?;
-        if let Some(file) = &mut self.predict {
+        if let Some(file) = self.predict.as_mut() {
             file.seek(SeekFrom::Start(position))?;
         }
-        self.output.seek(SeekFrom::Start(position))?;
+        if let Some(file) = self.output.as_mut() {
+            file.seek(SeekFrom::Start(position))?;
+        }
         Ok(())
     }
 
@@ -361,6 +369,14 @@ impl UpdateFiles {
         }
         self.target
             .read_exact(buffers.target[..size].as_mut_bytes())?;
+        Ok(())
+    }
+
+    /// Write the predictions to the output file.
+    fn write(&mut self, predict: &[f32]) -> Result<()> {
+        if let Some(file) = self.output.as_mut() {
+            file.write_all(predict.as_bytes())?;
+        }
         Ok(())
     }
 }
@@ -484,7 +500,7 @@ mod tests {
 
         // Run the first update.
         let mut config = UpdateConfig {
-            train_step: 0,
+            train_step: 1,
             total_rows: NUM_ROWS,
             initial: 0.5,
             bits_per_batch: NUM_SAMPLES,

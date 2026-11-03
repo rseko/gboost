@@ -23,7 +23,7 @@ use itertools::Itertools;
 use num_traits::{Float, PrimInt};
 use rand::{SeedableRng, rngs::StdRng};
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Result, Write};
+use std::io::{Result, Write};
 use std::path::PathBuf;
 use thiserror::Error;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
@@ -59,7 +59,7 @@ pub struct BoostModel<T, I, O> {
     data: Dataset<T>,
     index: Vec<RowIndex<I, O>>,
     predict: Vec<f32>,
-    model: Vec<Tree>,
+    trees: Vec<Tree>,
     offload: Option<UpdateConfig>,
 }
 
@@ -82,7 +82,7 @@ where
         // Per-round RNG: global seed + round index, so each round is
         // independently reproducible.
         let parallel = self.options.boost_options.parallel;
-        let seed = self.options.boost_options.seed + self.model.len() as u64;
+        let seed = self.options.boost_options.seed + self.trees.len() as u64;
         let mut rng = StdRng::seed_from_u64(seed);
 
         // Grow the tree and bail early if the root is a leaf (no gain).
@@ -132,12 +132,16 @@ where
                 .create(true)
                 .open(path.join(FILENAME_MODEL))?;
 
-            let content = format!("\n{}\n", tree.to_string(Some(self.data.features())));
+            let content = format!(
+                "{}{}\n",
+                if !self.trees.is_empty() { "\n" } else { "" },
+                tree.to_string(Some(self.data.features()))
+            );
             model_file.write_all(content.as_bytes())?;
         }
 
         // Record the tree and signal a successful round.
-        self.model.push(tree);
+        self.trees.push(tree);
         Ok(true)
     }
 
@@ -197,19 +201,14 @@ where
         // header block, already described by `data.features()`) is skipped
         // so the parse starts at the first tree and keeps consistent line
         // numbers. Each replayed tree folds into `predict` in turn.
-        let mut model = vec![];
+        let mut trees = vec![];
         if let Some(path) = options.boost_options.persist_path.as_ref()
-            && let Ok(mut model_file) = File::open(path.join(FILENAME_MODEL))
+            && path.join(FILENAME_MODEL).exists()
         {
-            let mut content = String::new();
-            model_file.read_to_string(&mut content)?;
-            let start = content.chars().position(|c| c != '\n').unwrap_or(0);
-
-            // `start + 1` is the 1-based line number of the first tree,
-            // so parse errors point at the right source line.
-            model = parse_trees(&content[start..], data.features(), start + 1)
+            let content = std::fs::read_to_string(path.join(FILENAME_MODEL))?;
+            trees = parse_trees(&content, data.features(), 1)
                 .map_err(|err| BoostError::Parser(format!("{err:#}")))?;
-            for tree in model.iter() {
+            for tree in trees.iter() {
                 update_small(&mut predict, &mut index, &data, Some(tree), parallel);
             }
         }
@@ -219,7 +218,7 @@ where
             data,
             index,
             predict,
-            model,
+            trees,
             offload: None,
         })
     }
@@ -241,9 +240,7 @@ where
         };
 
         // Parse the feature headers and all previously saved trees.
-        let mut model_file = File::open(path.join(FILENAME_MODEL))?;
-        let mut content = String::new();
-        model_file.read_to_string(&mut content)?;
+        let content = std::fs::read_to_string(path.join(FILENAME_MODEL))?;
         let (features, trees) =
             parse_model(&content).map_err(|err| BoostError::Parser(format!("{err:#}")))?;
 
@@ -259,14 +256,13 @@ where
         // pre-sampled row set.
         let batch_size = (options.tree_options.subsample.clamp(0.0, 1.0) * BATCH as f64).round();
         let bits_per_batch = (batch_size as usize).max(1);
-        let sample_rows = rows * bits_per_batch / BATCH;
+        let sample_rows = (rows * bits_per_batch / BATCH).max(1);
         options.tree_options.subsample = 1.0; // reset the subsample
 
         // Zeroed placeholder inputs: real bin values are streamed into these
         // slices by `update_large`.
         let inputs = vec![vec![T::new_zeroed(); sample_rows]; features.len()];
-        let mut data = Dataset::<T>::new(features, inputs, vec![])
-            .map_err(|err| BoostError::Dataset(err.to_string()))?;
+        let mut data = Dataset::<T>::new(features, inputs, vec![]).unwrap();
         let mut index = RowIndex::new_array(sample_rows);
 
         // Continue the saved booster: its `trees.len()` steps are done, so
@@ -294,9 +290,17 @@ where
             data,
             index,
             predict: vec![],
-            model: trees,
+            trees,
             offload: Some(config),
         })
+    }
+}
+
+impl<T: Copy, I, O> std::fmt::Debug for BoostModel<T, I, O> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let format_tree = |t: &Tree| t.to_string(Some(self.data.features()));
+        let trees = self.trees.iter().map(format_tree).join("\n\n");
+        write!(f, "{:?}\n{}", self.data, trees)
     }
 }
 
@@ -329,7 +333,7 @@ impl ModelInit {
     /// kind, bin boundaries) to the model file, and record the descriptor.
     ///
     /// Returns the fitted bin boundaries.
-    pub fn write_feature<F, T>(
+    pub fn write_feature<T, F>(
         &mut self,
         name: &str,
         kind: FeatureKind,
@@ -373,14 +377,183 @@ impl ModelInit {
     }
 
     /// Write the per-row target column (one f32 per row) to the dataset.
-    pub fn write_target(&self, data: &[f32]) -> Result<()> {
+    pub fn write_target(&mut self, data: &[f32]) -> Result<()> {
         let mut target_file = File::create(self.path.join(FILENAME_TARGET))?;
         target_file.write_all(data.as_bytes())?;
+        self.model_file.write_all(b"\n")?;
         Ok(())
     }
 
     /// Consume the staged descriptors and return the feature list.
     pub fn finish(self) -> Vec<Feature> {
         self.features
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dataset::SquaredLoss;
+    use crate::update_large::FILENAME_PREDICT;
+    use rand::{Rng, RngExt};
+    use std::io::Read;
+
+    const NUM_ROWS: usize = 1000;
+    const NUM_COLS: usize = 10;
+
+    fn build_data() -> (Vec<Vec<f32>>, Vec<f32>) {
+        let mut rng = StdRng::seed_from_u64(0);
+        let mut data = vec![vec![0.0; NUM_ROWS]; NUM_COLS];
+        for row in data.iter_mut() {
+            rng.fill_bytes(row.as_mut_bytes());
+        }
+        let target = (0..NUM_ROWS).map(|_| rng.random_range(0.0..1.0)).collect();
+        (data, target)
+    }
+
+    #[test]
+    fn small_test() {
+        let (data, target) = build_data();
+        let inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
+        let options = Options::default();
+        let mut model =
+            BoostModel::<u8, u32, SquaredLoss>::init_small(options, &inputs, &target, None)
+                .unwrap();
+        model.fit_next().unwrap();
+        model.fit_next().unwrap();
+
+        assert_eq!(
+            model.data.features()[0].bins()[192..196],
+            [2.158268, 6.059814, 14.9356165, 28.31305]
+        );
+        assert_eq!(
+            model.data.inputs()[0][..8],
+            [46, 66, 113, 54, 45, 132, 83, 106]
+        );
+        assert_eq!(
+            model.predict[..4],
+            [0.24033013, 0.24033013, 0.20896423, 0.24271369]
+        );
+    }
+
+    #[test]
+    fn small_restore() {
+        let (data, target) = build_data();
+        let inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let options = Options::default()
+            .set_subsample(0.5)
+            .set_persist_path(Some(temp_dir.path().into()));
+
+        // Run a single pass and create a second model.
+        let mut model =
+            BoostModel::<u8, u32, SquaredLoss>::init_small(options.clone(), &inputs, &target, None)
+                .unwrap();
+        model.fit_next().unwrap();
+
+        let mut model_restored =
+            BoostModel::<u8, u32, SquaredLoss>::init_small(options, &inputs, &target, None)
+                .unwrap();
+
+        // Run another pass for both models and compare.
+        model.fit_next().unwrap();
+        model_restored.fit_next().unwrap();
+        assert_eq!(model.predict, model_restored.predict);
+        assert_eq!(format!("{:?}", model), format!("{:?}", model_restored));
+    }
+
+    #[test]
+    fn small_invalid() {
+        let create = |options: Options, features: Option<Vec<Feature>>| {
+            BoostModel::<u8, u32, SquaredLoss>::init_small::<f32>(options, &[&[]], &[], features)
+        };
+        let err1 = create(Options::default(), Some(vec![]));
+        assert!(matches!(err1, Err(BoostError::Dataset(_))));
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let mut file = File::create(temp_dir.path().join(FILENAME_MODEL)).unwrap();
+        file.write_all(b"error").unwrap();
+        let options = Options::default().set_persist_path(Some(temp_dir.path().into()));
+        let err2 = create(options, None);
+        assert!(matches!(err2, Err(BoostError::Parser(_))));
+    }
+
+    #[test]
+    fn large_test() {
+        let (data, target) = build_data();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let options = Options::default()
+            .set_subsample(0.5)
+            .set_persist_path(Some(temp_dir.path().into()));
+
+        // Create the model data on disk.
+        let mut model_init = ModelInit::new(temp_dir.path().into(), 255).unwrap();
+        for (idx, row) in data.iter().enumerate() {
+            let kind = if idx % 2 == 0 {
+                FeatureKind::Linear
+            } else {
+                FeatureKind::OneHot
+            };
+            model_init
+                .write_feature::<u8, _>(&idx.to_string(), kind, row)
+                .unwrap();
+        }
+        model_init.write_target(&target).unwrap();
+        let features = model_init.finish();
+
+        // Create the model and fit data.
+        let mut model = BoostModel::<u8, u32, SquaredLoss>::init_large(options).unwrap();
+        model.fit_next().unwrap();
+        model.fit_next().unwrap();
+
+        assert_eq!(model.data.features(), features);
+        assert_eq!(
+            model.offload,
+            Some(UpdateConfig {
+                train_step: 2,
+                total_rows: NUM_ROWS,
+                initial: 0.0,
+                bits_per_batch: BATCH / 2,
+            })
+        );
+
+        // Verify checksums of the predictions.
+        let checksum = |idx: usize| -> u64 {
+            let path = temp_dir
+                .path()
+                .join(FILENAME_PREDICT)
+                .with_extension(idx.to_string());
+            let mut file = File::open(path).unwrap();
+            let mut buffer = vec![0_u8; NUM_ROWS * 4];
+            file.read_exact(&mut buffer).unwrap();
+            let chunks = buffer.as_bytes().as_chunks::<8>().0;
+            chunks
+                .iter()
+                .fold(0_u64, |acc, part| acc ^ u64::from_le_bytes(*part))
+        };
+        assert_eq!(checksum(1), 387_416_199_230_371_108);
+        assert_eq!(checksum(2), 12_201_151_743_841_195);
+    }
+
+    #[test]
+    fn large_invalid() {
+        let create = |options: Options| BoostModel::<u8, u32, SquaredLoss>::init_large(options);
+        let err1 = create(Options::default());
+        assert!(matches!(err1, Err(BoostError::MissingPath)));
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        File::create(temp_dir.path().join(FILENAME_MODEL)).unwrap();
+        let options = Options::default().set_persist_path(Some(temp_dir.path().into()));
+        let err2 = create(options.clone());
+        assert!(matches!(err2, Err(BoostError::Parser(_))));
+    }
+
+    #[test]
+    fn single_row() {
+        let options = Options::default();
+        let mut model =
+            BoostModel::<u8, u32, SquaredLoss>::init_small(options, &[&[1.0]], &[1.0], None)
+                .unwrap();
+        assert_eq!(model.fit_next().ok(), Some(false));
     }
 }
