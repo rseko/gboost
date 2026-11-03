@@ -12,7 +12,7 @@ use crate::boost_tree::TreeBuilder;
 use crate::dataset::{Dataset, Feature, FeatureKind, IndexT, Objective, RowIndex};
 use crate::options::Options;
 use crate::parser::{parse_model, parse_trees};
-use crate::quantize::Quantizer;
+use crate::quantize::{Quantizer, quantize};
 use crate::tree::{NodeKind, Tree};
 use crate::update_large::{
     BATCH, FILENAME_INPUT, FILENAME_TARGET, UpdateConfig, sanitize_name, update_large,
@@ -22,6 +22,7 @@ use crate::update_small::update_small;
 use itertools::Itertools;
 use num_traits::{Float, PrimInt};
 use rand::{SeedableRng, rngs::StdRng};
+use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
 use std::io::{Result, Write};
 use std::path::PathBuf;
@@ -69,6 +70,64 @@ where
     I: IndexT,
     O: Objective,
 {
+    /// Predict over a batch of raw (unquantized) feature columns.
+    ///
+    /// `inputs` holds one column per feature, in feature order; every
+    /// column must have the same length. Each row's prediction is the
+    /// configured base score plus the sum of the leaf values the row
+    /// lands in across all trees. A value that fails to convert to `f32`
+    /// is treated as NaN and routes through the missing-value branch.
+    /// Parallelism follows the configured `parallel` option.
+    pub fn predict<F>(&self, inputs: &[&[F]]) -> BoostResult<Vec<f32>>
+    where
+        F: Float + Sync,
+    {
+        // Verify the correctness of the inputs.
+        let data_error = |s: &str| BoostError::Dataset(s.into());
+        if inputs.len() != self.data.columns() {
+            return Err(data_error("input columns do not match features"));
+        }
+        let rows = inputs[0].len();
+        if inputs.iter().any(|col| col.len() != rows) {
+            return Err(data_error("input matrix is not dense"));
+        }
+
+        // Compute one row's prediction: for each tree, resolve the row's bin
+        // per column (`get_bin`) to walk to a leaf, then sum the leaf values.
+        let predict = |row: usize| {
+            let get_bin = |col: usize| {
+                let value = inputs[col][row].to_f32().unwrap_or(f32::NAN);
+                let bins = self.data.features()[col].bins();
+                quantize::<f32, T>(&value, bins).into()
+            };
+            self.trees
+                .iter()
+                .map(|tree| tree.find_leaf(get_bin).get_value())
+                .sum::<f32>()
+        };
+
+        // One slot per row, filled with `base_score + predict(row)`.
+        let mut result = vec![0.0; rows];
+        let base_score = self.options.boost_options.base_score;
+
+        if self.options.boost_options.parallel {
+            const BATCH_SIZE: usize = 1024;
+            result
+                .par_chunks_mut(BATCH_SIZE)
+                .enumerate()
+                .for_each(|(idx, chunk)| {
+                    chunk.iter_mut().enumerate().for_each(|(i, dst)| {
+                        *dst = base_score + predict(idx * BATCH_SIZE + i);
+                    });
+                });
+        } else {
+            for (idx, dst) in result.iter_mut().enumerate() {
+                *dst = base_score + predict(idx);
+            }
+        }
+        Ok(result)
+    }
+
     /// Grow one boosting tree over the current gradient/hessian index and
     /// fold it into the running predictions.
     ///
@@ -78,7 +137,7 @@ where
     /// nothing, so the round is skipped and `false` is returned; otherwise
     /// the tree is applied to the data, appended to the model file (when a
     /// persistence path is set), and `true` is returned.
-    pub fn fit_next(&mut self) -> Result<bool> {
+    pub fn fit_next(&mut self) -> BoostResult<bool> {
         // Per-round RNG: global seed + round index, so each round is
         // independently reproducible.
         let parallel = self.options.boost_options.parallel;
@@ -340,8 +399,8 @@ impl ModelInit {
         data: &[F],
     ) -> Result<Vec<F>>
     where
-        F: Float + FromBytes + Immutable + IntoBytes + Send + Sync,
         T: PrimInt + Immutable + IntoBytes,
+        F: Float + FromBytes + Immutable + IntoBytes + Send + Sync,
     {
         // Special characters in the name are mapped to `_` so the file
         // extension stays portable.
@@ -349,13 +408,15 @@ impl ModelInit {
         let mut feature_file = File::create(self.path.join(FILENAME_INPUT).with_extension(suffix))?;
 
         // Fit the quantizer and write the quantized column to disk.
-        let quantizer = Quantizer::fit_from(data, self.max_bins);
-        let data_quant = quantizer.quantize::<T>(data);
+        let bins_quant = Quantizer::fit_from(data, self.max_bins);
+        let data_quant = data
+            .iter()
+            .map(|x| quantize::<F, T>(x, &bins_quant))
+            .collect::<Vec<_>>();
         feature_file.write_all(data_quant.as_bytes())?;
 
         // Emit the header line: `name kind [b0, b1, ...]`.
-        let bins = quantizer
-            .bins
+        let bins = bins_quant
             .iter()
             .map(|x| x.to_f32().unwrap_or(f32::NAN))
             .collect::<Vec<_>>();
@@ -373,7 +434,7 @@ impl ModelInit {
         // Store the feature and return the thresholds.
         self.features
             .push(Feature::new(Some(name.into()), kind, bins));
-        Ok(quantizer.bins)
+        Ok(bins_quant)
     }
 
     /// Write the per-row target column (one f32 per row) to the dataset.
@@ -555,5 +616,48 @@ mod tests {
             BoostModel::<u8, u32, SquaredLoss>::init_small(options, &[&[1.0]], &[1.0], None)
                 .unwrap();
         assert_eq!(model.fit_next().ok(), Some(false));
+    }
+
+    #[test]
+    fn predict_test() {
+        let (data, target) = build_data();
+        let inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
+
+        for parallel in [false, true] {
+            let options = Options::default()
+                .set_parallel(parallel)
+                .set_base_score(0.5)
+                .set_max_depth(3);
+            let mut model =
+                BoostModel::<u8, u32, SquaredLoss>::init_small(options, &inputs, &target, None)
+                    .unwrap();
+            for _ in 0..10 {
+                assert_eq!(model.fit_next().ok(), Some(true));
+            }
+
+            let predict = model.predict(&inputs).unwrap();
+            let mean_error = predict
+                .iter()
+                .zip(&target)
+                .map(|(a, b)| (a - b).abs())
+                .sum::<f32>()
+                / predict.len() as f32;
+            assert_eq!(mean_error, 0.22513878);
+        }
+    }
+
+    #[test]
+    fn predict_invalid() {
+        let (data, target) = build_data();
+        let mut inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
+        let options = Options::default();
+        let model = BoostModel::<u8, u32, SquaredLoss>::init_small(options, &inputs, &target, None)
+            .unwrap();
+
+        let err1 = model.predict::<f32>(&[]);
+        assert!(matches!(err1, Err(BoostError::Dataset(_))));
+        let _ = inputs[1].split_off(..1);
+        let err2 = model.predict::<f32>(&inputs);
+        assert!(matches!(err2, Err(BoostError::Dataset(_))));
     }
 }

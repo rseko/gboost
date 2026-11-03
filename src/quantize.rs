@@ -1,25 +1,40 @@
 //! Bin-boundary fitting: turn a feature's raw values into the sorted
-//! thresholds the tree compares against (`Quantizer.bins`).
+//! thresholds the tree compares against, and map each value to its
+//! 1-based bin index (`quantize`) among those thresholds.
 //!
-//! - `Quantizer::fit_from` is the entry point; NaNs are always dropped,
-//!   and an empty result is normalized to a single positive infinity.
+//! - `Quantizer::fit_from` is the fitting entry point; NaNs are always
+//!   dropped, and an empty result is normalized to a single positive
+//!   infinity.
 //! - `fit_small` uses an exact float16 histogram (total ordering) and
 //!   quantile-walks the histogram to choose the bins.
 //! - `fit_large` sorts the values and either keeps the distinct values
 //!   or samples them evenly by rank.
+//! - `Quantizer::quantize_all` fits every column and quantizes it in one
+//!   pass; the free `quantize` does that mapping for a single value.
 
 use num_traits::{Float, PrimInt};
 use rayon::prelude::*;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-/// Sorted bin boundaries fitted from a batch of raw feature values.
+/// Map a value to its 1-based bin index among the sorted `bins`.
+/// With `bins = [1, 2, 3]`: `value <= 1` → 1, `1 < value <= 2` → 2,
+/// `value > 2` → 3. NaN maps to 0.
+pub fn quantize<F: Float, I: PrimInt>(value: &F, bins: &[F]) -> I {
+    if !value.is_nan() {
+        let pos = bins.partition_point(|x| value > x) + 1;
+        I::from(pos.min(bins.len())).unwrap_or(I::zero())
+    } else {
+        I::zero()
+    }
+}
+
+/// Bin-boundary fitting namespace: fit thresholds from raw values and map
+/// values to their 1-based bin index among them.
 ///
-/// `bins` splits the numeric domain into `bins.len()` ranges, e.g.
+/// Fitted `bins` split the numeric domain into `bins.len()` ranges, e.g.
 /// `[1, 2, 3]` means (-inf, 1]; (1, 2]; (2, inf). If the input has no
 /// usable values the single bin is positive infinity.
-pub struct Quantizer<T> {
-    pub bins: Vec<T>,
-}
+pub struct Quantizer<T>(std::marker::PhantomData<T>);
 
 impl<T> Quantizer<T>
 where
@@ -35,9 +50,9 @@ where
         parallel: bool,
     ) -> (Vec<Vec<I>>, Vec<Vec<T>>) {
         let quantize = |row: &&[T]| {
-            let inst = Quantizer::fit_from(row, max_bins);
-            let data = inst.quantize(row);
-            (data, inst.bins)
+            let bins = Self::fit_from(row, max_bins);
+            let data = row.iter().map(|x| quantize(x, &bins)).collect();
+            (data, bins)
         };
         if parallel {
             data.par_iter().map(quantize).unzip()
@@ -46,27 +61,12 @@ where
         }
     }
 
-    /// Maps each value of `data` to the index of the bin (the range
-    /// between consecutive boundaries, see `bins`) it falls in. Bin
-    /// indices are 1-based; NaNs get the sentinel bin `0`.
-    pub fn quantize<I: PrimInt>(&self, data: &[T]) -> Vec<I> {
-        let convert = |value: &T| -> I {
-            if !value.is_nan() {
-                let pos = self.bins.partition_point(|x| value > x) + 1;
-                I::from(pos.min(self.bins.len())).unwrap_or(I::zero())
-            } else {
-                I::zero()
-            }
-        };
-        data.iter().map(convert).collect()
-    }
-
     /// Fit up to `max_bins` boundaries from `data`.
     ///
     /// NaNs are never treated as values. Dispatches to the histogram
     /// algorithm for float16 on large batches, otherwise to the sort-based
     /// one. The returned `bins` is always non-empty.
-    pub fn fit_from(data: &[T], max_bins: usize) -> Self {
+    pub fn fit_from(data: &[T], max_bins: usize) -> Vec<T> {
         assert!(max_bins > 0);
 
         let n_bytes = std::mem::size_of::<T>();
@@ -82,7 +82,7 @@ where
         if bins.is_empty() {
             bins.push(T::infinity());
         }
-        Self { bins }
+        bins
     }
 
     /// Histogram-based fit for a float type `T` whose values fit in `I`.
@@ -295,22 +295,16 @@ mod tests {
 
     #[test]
     fn quantize() {
-        let test = Quantizer::<f32> {
-            bins: vec![1.0, 2.0, 3.0],
-        };
-        assert_eq!(
-            test.quantize::<u8>(&[
-                f32::nan(),
-                f32::neg_infinity(),
-                1.0,
-                1.5,
-                2.0,
-                2.5,
-                3.0,
-                f32::infinity()
-            ]),
-            vec![0, 1, 1, 2, 2, 3, 3, 3]
-        );
+        let bins = vec![1.0, 2.0, 3.0];
+        let quantize = |x: f32| super::quantize::<f32, u8>(&x, &bins);
+        assert_eq!(quantize(f32::NAN), 0);
+        assert_eq!(quantize(f32::NEG_INFINITY), 1);
+        assert_eq!(quantize(1.0), 1);
+        assert_eq!(quantize(1.5), 2);
+        assert_eq!(quantize(2.0), 2);
+        assert_eq!(quantize(2.5), 3);
+        assert_eq!(quantize(3.0), 3);
+        assert_eq!(quantize(f32::INFINITY), 3);
     }
 
     #[test]
@@ -424,24 +418,21 @@ mod tests {
     #[test]
     fn fit_from_empty() {
         let data_f16 = Vec::<f16>::new();
-        assert_eq!(Quantizer::fit_from(&data_f16, 2).bins, vec![f16::INFINITY]);
+        assert_eq!(Quantizer::fit_from(&data_f16, 2), vec![f16::INFINITY]);
 
         let data_f32 = Vec::<f32>::new();
-        assert_eq!(Quantizer::fit_from(&data_f32, 2).bins, vec![f32::INFINITY]);
+        assert_eq!(Quantizer::fit_from(&data_f32, 2), vec![f32::INFINITY]);
     }
 
     #[test]
     fn fit_from_large() {
         let data_f16 = [f16::MIN, f16::ZERO, f16::ONE, f16::MAX].repeat(1024);
         assert_eq!(
-            Quantizer::fit_from(&data_f16, 3).bins,
+            Quantizer::fit_from(&data_f16, 3),
             vec![f16::ZERO, f16::ONE, f16::MAX]
         );
 
         let data_f32 = [f32::MIN, 0.0, 1.0, f32::MAX].repeat(1024);
-        assert_eq!(
-            Quantizer::fit_from(&data_f32, 3).bins,
-            vec![0.0, 1.0, f32::MAX]
-        );
+        assert_eq!(Quantizer::fit_from(&data_f32, 3), vec![0.0, 1.0, f32::MAX]);
     }
 }
