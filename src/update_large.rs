@@ -27,7 +27,7 @@ pub const FILENAME_PREDICT: &str = "boost";
 
 /// Sanitize special characters in a feature name.
 pub fn sanitize_name(name: &str) -> String {
-    name.replace(['.', '/'], "_")
+    name.replace(['.', '/', ' '], "_")
 }
 
 /// Maximum number of rows processed in a single batch. The data is partitioned
@@ -369,7 +369,7 @@ impl UpdateFiles {
         if let Some(file) = self.predict.as_mut() {
             file.read_exact(buffers.predict[..size].as_mut_bytes())?;
         } else {
-            buffers.predict.fill(initial);
+            buffers.predict[..size].fill(initial);
         }
         self.target
             .read_exact(buffers.target[..size].as_mut_bytes())?;

@@ -126,8 +126,10 @@ fn bench_quant<T: QuantFloat>(c: &mut Criterion, prefix: &str) {
     c.bench_function(&name("bins:1"), |b| {
         b.iter(|| bins_from(&data, NUM_BINS));
     });
+
+    let bins = bins_from(&data, NUM_BINS);
     c.bench_function(&name("quantize:1"), |b| {
-        b.iter(|| quantize_all::<T, u8>(&[&data], NUM_BINS, false));
+        b.iter(|| quantize_all::<T, u8>(&[(&data, &bins)], false));
     });
 }
 

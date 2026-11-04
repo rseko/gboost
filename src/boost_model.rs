@@ -4,15 +4,15 @@
 //! Structures:
 //! - `BoostModel`: one booster - `fit_next` grows and applies one tree;
 //!   `init_small` / `init_large` build a booster from in-memory data or an
-//!   on-disk dataset.
+//!   on-disk dataset; `predict` scores raw input columns.
 //! - `ModelInit`: streams feature/target columns to disk for a large
 //!   dataset while recording the feature header lines.
 
 use crate::boost_tree::TreeBuilder;
 use crate::dataset::{Dataset, Feature, FeatureKind, IndexT, Objective, RowIndex};
 use crate::options::Options;
-use crate::parser::{parse_model, parse_trees};
-use crate::quantize::{QuantFloat, bins_from, quantize, quantize_all};
+use crate::parser::parse_model;
+use crate::quantize::{QuantFloat, bin_all, bins_from, quantize, quantize_all};
 use crate::tree::{NodeKind, Tree};
 use crate::update_large::{
     BATCH, FILENAME_INPUT, FILENAME_TARGET, UpdateConfig, sanitize_name, update_large,
@@ -160,7 +160,7 @@ where
 
         // Apply the tree: offload path streams over disk, small path folds
         // in-memory.
-        let path = self.options.boost_options.persist_path.as_ref();
+        let persist_path = self.options.boost_options.persist_path.as_ref();
         if let Some(config) = &mut self.offload {
             config.train_step += 1;
             rng = StdRng::seed_from_u64(seed + 1);
@@ -169,7 +169,7 @@ where
                 &mut self.data,
                 &mut self.index,
                 Some(&tree),
-                path.unwrap(),
+                persist_path.unwrap(),
                 config,
                 &mut rng,
                 parallel,
@@ -185,10 +185,10 @@ where
         }
 
         // Append the tree to the model file (one tree per round).
-        if let Some(path) = path {
+        if let Some(path) = persist_path {
             let mut model_file = OpenOptions::new()
                 .append(true)
-                .create(true)
+                .create(false)
                 .open(path.join(FILENAME_MODEL))?;
 
             let content = format!(
@@ -207,66 +207,99 @@ where
     /// Build a booster over in-memory training columns (the small-dataset
     /// path; no persistence required).
     ///
-    /// The raw `inputs` columns are quantized to bin indices and the fitted
-    /// boundaries are stored on the `features` descriptors (any provided
-    /// names/kinds are kept, generated when absent). The running prediction
-    /// starts at `base_score` for every row, the per-row index is seeded by
-    /// one tree-less update, and any persisted model file is replayed so a
-    /// saved booster can be reinitialized and trained further.
+    /// Without a saved model file, the raw `inputs` columns are quantized to
+    /// bin indices and the fitted boundaries (capped by `max_bins`) are
+    /// stored on the `features` descriptors - any provided names/kinds are
+    /// kept, generated when absent - and the header lines are written to the
+    /// model file (when a persistence path is set).
+    ///
+    /// With a saved model file, the feature descriptors, stored boundaries,
+    /// and trees are loaded from it and `inputs` are mapped against the
+    /// stored boundaries, so a saved booster can be reinitialized and trained
+    /// further with the same bin grid.
     pub fn init_small<F: QuantFloat>(
         options: Options,
         inputs: &[&[F]],
         target: &[f32],
         features: Option<Vec<Feature>>,
     ) -> BoostResult<Self> {
-        // Fit one quantizer per column: the quantized bin indices become the
-        // dataset inputs and the fitted boundaries replace the feature bins.
+        let persist_path = options.boost_options.persist_path.as_ref();
         let parallel = options.boost_options.parallel;
-        let (all_rows, all_bins) =
-            quantize_all(inputs, options.boost_options.max_bins as usize, parallel);
 
-        // Without caller-supplied descriptors, synthesize linear features
-        // named by their column position.
-        let mut features = features.unwrap_or_else(|| {
-            (0..inputs.len())
-                .map(|i| Feature::linear(Some(i.to_string()), vec![]))
-                .collect()
-        });
+        // Map the raw input columns to bin indices against one set of
+        // boundaries (the stored ones when restoring, the fitted ones
+        // otherwise).
+        let quantize = |bins: &[Vec<F>]| {
+            let pairs = inputs
+                .iter()
+                .zip(bins.iter())
+                .map(|(a, b)| (*a, b.as_slice()))
+                .collect::<Vec<_>>();
+            quantize_all::<F, T>(&pairs, parallel)
+        };
 
-        // Keep each feature's name and kind, but store the fitted boundaries.
-        for (feat, bins) in features.iter_mut().zip(all_bins) {
-            let name = (!feat.name().is_empty()).then(|| feat.name().to_string());
-            let bins = bins
-                .into_iter()
-                .map(|x| x.to_f32().unwrap_or(f32::NAN))
-                .collect();
-            *feat = Feature::new(name, feat.kind(), bins);
-        }
-
-        // Assemble the dataset from the quantized columns and targets.
-        let data = Dataset::new(features, all_rows, target.to_vec())
-            .map_err(|err| BoostError::Dataset(err.to_string()))?;
-
-        // Seed the running prediction and the per-row gradient/hessian index
-        // from the base score (no tree yet).
-        let mut index = RowIndex::<I, O>::new_array(target.len());
-        let mut predict = vec![options.boost_options.base_score; target.len()];
-        update_small(&mut predict, &mut index, &data, None, parallel);
-
-        // Replay any saved model: the leading blank line (and the feature
-        // header block, already described by `data.features()`) is skipped
-        // so the parse starts at the first tree and keeps consistent line
-        // numbers. Each replayed tree folds into `predict` in turn.
-        let mut trees = vec![];
-        if let Some(path) = options.boost_options.persist_path.as_ref()
+        // Restore a saved booster (model file present) or fit a fresh one.
+        let (features, rows, trees) = if let Some(path) = persist_path
             && path.join(FILENAME_MODEL).exists()
         {
             let content = std::fs::read_to_string(path.join(FILENAME_MODEL))?;
-            trees = parse_trees(&content, data.features(), 1)
-                .map_err(|err| BoostError::Parser(format!("{err:#}")))?;
-            for tree in trees.iter() {
-                update_small(&mut predict, &mut index, &data, Some(tree), parallel);
+            let (features, trees) =
+                parse_model(&content).map_err(|err| BoostError::Parser(format!("{err:#}")))?;
+
+            // The file stores boundaries as f32; convert them back to the
+            // input type (a boundary `F` cannot represent maps to NaN).
+            let convert = |x: &f32| F::from(*x).unwrap_or(F::nan());
+            let all_bins = features
+                .iter()
+                .map(|feat| feat.bins().iter().map(convert).collect::<Vec<_>>())
+                .collect::<Vec<_>>();
+
+            (features, quantize(&all_bins), trees)
+        } else {
+            // Without caller-supplied descriptors, synthesize linear features
+            // named by their column position.
+            let mut features = features.unwrap_or_else(|| {
+                (0..inputs.len())
+                    .map(|i| Feature::linear(Some(i.to_string()), vec![]))
+                    .collect()
+            });
+
+            // Fit one quantizer per column and keep each feature's name and
+            // kind, but store the fitted boundaries (as f32).
+            let all_bins = bin_all(inputs, options.boost_options.max_bins as usize, parallel);
+            for (feat, bins) in features.iter_mut().zip(all_bins.iter()) {
+                let name = (!feat.name().is_empty()).then(|| feat.name().to_string());
+                let bins = bins
+                    .iter()
+                    .map(|x| x.to_f32().unwrap_or(f32::NAN))
+                    .collect();
+                *feat = Feature::new(name, feat.kind(), bins);
             }
+
+            // Start the model file with the feature header block so later
+            // `fit_next` rounds can append their trees.
+            if let Some(path) = persist_path {
+                let mut model_file = File::create(path.join(FILENAME_MODEL))?;
+                for feat in features.iter() {
+                    model_file.write_all(format_feature(feat).as_bytes())?;
+                }
+                model_file.write_all(b"\n")?;
+            }
+
+            (features, quantize(&all_bins), vec![])
+        };
+
+        // Assemble the dataset from the quantized columns and targets, then
+        // seed the running prediction and the per-row gradient/hessian index
+        // from the base score (no tree yet), replaying each saved tree in turn.
+        let data = Dataset::new(features, rows, target.to_vec())
+            .map_err(|err| BoostError::Dataset(err.to_string()))?;
+        let mut index = RowIndex::<I, O>::new_array(target.len());
+        let mut predict = vec![options.boost_options.base_score; target.len()];
+
+        update_small(&mut predict, &mut index, &data, None, parallel);
+        for tree in &trees {
+            update_small(&mut predict, &mut index, &data, Some(tree), parallel);
         }
 
         Ok(Self {
@@ -417,20 +450,12 @@ impl ModelInit {
             .iter()
             .map(|x| x.to_f32().unwrap_or(f32::NAN))
             .collect::<Vec<_>>();
-        let feature_line = format!(
-            "{} {} [{}]\n",
-            name,
-            match kind {
-                FeatureKind::Linear => "linear",
-                FeatureKind::OneHot => "onehot",
-            },
-            bins.iter().join(", "),
-        );
-        self.model_file.write_all(feature_line.as_bytes())?;
+        let feature = Feature::new(Some(name.into()), kind, bins);
+        self.model_file
+            .write_all(format_feature(&feature).as_bytes())?;
 
         // Store the feature and return the thresholds.
-        self.features
-            .push(Feature::new(Some(name.into()), kind, bins));
+        self.features.push(feature);
         Ok(bins_quant)
     }
 
@@ -446,6 +471,19 @@ impl ModelInit {
     pub fn finish(self) -> Vec<Feature> {
         self.features
     }
+}
+
+/// Render one feature header line of the model file: `name kind [b0, ...]`.
+fn format_feature(feat: &Feature) -> String {
+    format!(
+        "{} {} [{}]\n",
+        feat.name().replace(' ', "_"),
+        match feat.kind() {
+            FeatureKind::Linear => "linear",
+            FeatureKind::OneHot => "onehot",
+        },
+        feat.bins().iter().join(", ")
+    )
 }
 
 #[cfg(test)]

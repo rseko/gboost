@@ -209,6 +209,7 @@ where
         if batch.is_empty() {
             return false;
         }
+        assert!(batch.iter().all(|x| x.depth == batch[0].depth));
 
         let depth_limit = self.tree_options.max_depth.overflowing_sub(1).0;
         let (can_split, cannot_split) = self.partition_batch(batch, depth_limit);

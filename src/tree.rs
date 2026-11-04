@@ -207,7 +207,10 @@ impl NodeSplit {
     /// Uses the feature's name and threshold when `feature` is provided,
     /// otherwise falls back to the raw feature/bin ids.
     pub fn to_string(&self, feature: Option<&Feature>) -> String {
-        let name = feature.map_or_else(|| self.feature_id.to_string(), |f| f.name().into());
+        let name = feature.map_or_else(
+            || self.feature_id.to_string(),
+            |f| f.name().replace(' ', "_"),
+        );
         if self.bin_id != 0 {
             let is_valid = |f: &Feature| (f.kind() == FeatureKind::Linear) == self.is_range;
             let pred = if feature.is_none_or(is_valid) {
@@ -288,7 +291,7 @@ mod tests {
 
     #[test]
     fn invalid_tree() {
-        let mut tree = create_test_tree(2);
+        let mut tree = create_test_tree(/*depth*/ 2);
 
         let empty_tree = Tree::new(vec![]);
         assert_eq!(empty_tree.unwrap_err().to_string(), "tree has no nodes");

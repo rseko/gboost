@@ -3,14 +3,15 @@
 //! 1-based bin index among those thresholds.
 //!
 //! - `quantize` maps a single value to its bin index; NaN maps to 0.
-//! - `quantize_all` fits every column and quantizes it in one pass,
-//!   returning `(quantized, bins)` per column.
+//! - `quantize_all` maps every column's values to their bin indices using
+//!   pre-fitted boundaries.
 //! - `bins_from` is the fitting entry point; NaNs are always dropped,
 //!   and an empty result is normalized to a single positive infinity.
 //!   - `fit_small` uses an exact float16 histogram (total ordering) and
 //!     quantile-walks the histogram to choose the bins.
 //!   - `fit_large` sorts the values and either keeps the distinct values
 //!     or samples them evenly by rank.
+//! - `bin_all` fits every column's bin boundaries.
 //! - `QuantFloat` is the bound every public float in this module shares.
 
 use num_traits::{Float, PrimInt};
@@ -30,28 +31,36 @@ pub fn quantize<F: Float, I: PrimInt>(value: &F, bins: &[F]) -> I {
     }
 }
 
+/// Map each value of every column to its 1-based bin index among that
+/// column's pre-fitted boundaries. `data_with_bins` pairs each column with
+/// its `bins` (both in column order); `quantized` is one `Vec<I>` per
+/// column (1-based, NaN -> 0).
+pub fn quantize_all<F: Float + Sync, I: PrimInt + Send>(
+    data_with_bins: &[(&[F], &[F])],
+    parallel: bool,
+) -> Vec<Vec<I>> {
+    let quantize = |(data, bins): &(&[F], &[F])| -> Vec<I> {
+        data.iter().map(|x| quantize(x, bins)).collect()
+    };
+    if parallel {
+        data_with_bins.par_iter().map(quantize).collect()
+    } else {
+        data_with_bins.iter().map(quantize).collect()
+    }
+}
+
 /// A floating-point type suitable for quantization.
 pub trait QuantFloat: Float + FromBytes + Immutable + IntoBytes + Send + Sync {}
 impl<T: Float + FromBytes + Immutable + IntoBytes + Send + Sync> QuantFloat for T {}
 
-/// Fit a quantizer per feature column and map each value to its bin
-/// index. Returns `(quantized, bins)`, both in column order; `quantized`
-/// is one `Vec<I>` per column (1-based, NaN -> 0), `bins` the fitted
-/// boundaries that produced them.
-pub fn quantize_all<F: QuantFloat, I: PrimInt + Send>(
-    data: &[&[F]],
-    max_bins: usize,
-    parallel: bool,
-) -> (Vec<Vec<I>>, Vec<Vec<F>>) {
-    let quantize = |row: &&[F]| {
-        let bins = bins_from(row, max_bins);
-        let data = row.iter().map(|x| quantize(x, &bins)).collect();
-        (data, bins)
-    };
+/// Fit a quantizer per column. Returns the fitted boundaries, one `Vec<F>`
+/// per column in column order.
+pub fn bin_all<F: QuantFloat>(data: &[&[F]], max_bins: usize, parallel: bool) -> Vec<Vec<F>> {
+    let bin = |data: &&[F]| bins_from(data, max_bins);
     if parallel {
-        data.par_iter().map(quantize).unzip()
+        data.par_iter().map(bin).collect()
     } else {
-        data.iter().map(quantize).unzip()
+        data.iter().map(bin).collect()
     }
 }
 
@@ -308,7 +317,13 @@ mod tests {
         let data: Vec<&[f32]> = vec![&col1, &col2];
 
         for parallel in [false, true] {
-            let (actual, bins) = super::quantize_all::<f32, u8>(&data, 3, parallel);
+            let bins = bin_all(&data, 3, parallel);
+            let pairs = data
+                .iter()
+                .zip(bins.iter())
+                .map(|(a, b)| (*a, b.as_slice()))
+                .collect::<Vec<_>>();
+            let actual = super::quantize_all::<f32, u8>(&pairs, parallel);
             assert_eq!(actual[0], vec![0, 1, 1, 2, 2, 3, 3]);
             assert_eq!(bins[0], vec![1.5, 2.5, f32::INFINITY]);
             assert_eq!(actual[1], vec![1, 2, 2, 3]);

@@ -26,7 +26,7 @@ pub fn parse_model(text: &str) -> Result<(Vec<Feature>, Vec<Tree>)> {
 }
 
 /// Parse the feature header block: one line per feature, `//` comments skipped.
-pub fn parse_features(text: &str, offset: usize) -> Result<Vec<Feature>> {
+fn parse_features(text: &str, offset: usize) -> Result<Vec<Feature>> {
     text.lines()
         .enumerate()
         // 1-indexed line numbers so errors point at the right source line.
@@ -62,7 +62,7 @@ fn parse_feature(text: &str) -> Result<Feature> {
 }
 
 /// Parse every blank-line-separated tree in the trees block.
-pub fn parse_trees(text: &str, features: &[Feature], offset: usize) -> Result<Vec<Tree>> {
+fn parse_trees(text: &str, features: &[Feature], offset: usize) -> Result<Vec<Tree>> {
     if text.is_empty() {
         return Ok(vec![]);
     }
