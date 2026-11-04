@@ -129,31 +129,31 @@ impl Options {
     // ----- `BoostTreeOptions` setters ------------------------------------------------------------
 
     /// Set the learning rate (per-tree update step size).
-    pub fn set_learning_rate(mut self, learning_rate: f64) -> Self {
+    pub fn set_learning_rate(mut self, learning_rate: f32) -> Self {
         self.tree_options.learning_rate = learning_rate;
         self
     }
 
     /// Set the row subsampling fraction (`< 1.0` samples a subset).
-    pub fn set_subsample(mut self, subsample: f64) -> Self {
+    pub fn set_subsample(mut self, subsample: f32) -> Self {
         self.tree_options.subsample = subsample;
         self
     }
 
     /// Set the per-tree feature subsampling fraction.
-    pub fn set_colsample_bytree(mut self, colsample_bytree: f64) -> Self {
+    pub fn set_colsample_bytree(mut self, colsample_bytree: f32) -> Self {
         self.tree_options.colsample_bytree = colsample_bytree;
         self
     }
 
     /// Set the per-level feature subsampling fraction.
-    pub fn set_colsample_bylevel(mut self, colsample_bylevel: f64) -> Self {
+    pub fn set_colsample_bylevel(mut self, colsample_bylevel: f32) -> Self {
         self.tree_options.colsample_bylevel = colsample_bylevel;
         self
     }
 
     /// Set the per-node feature subsampling fraction.
-    pub fn set_colsample_bynode(mut self, colsample_bynode: f64) -> Self {
+    pub fn set_colsample_bynode(mut self, colsample_bynode: f32) -> Self {
         self.tree_options.colsample_bynode = colsample_bynode;
         self
     }
@@ -216,8 +216,7 @@ impl Options {
     /// host- and version-independent:
     /// - `boost_options.persist_path`: machine-local, never serialized. It
     ///   must be re-supplied via `set_persist_path` after `from_json`.
-    /// - Any tree/node option equal to its `Default` value. The comparison
-    ///   is exact (bit-identical), so only true defaults are pruned.
+    /// - Any tree/node option equal to its default value.
     ///
     /// Every booster option other than `persist_path` is always present,
     /// defaults included.
@@ -323,7 +322,7 @@ mod tests {
     #[test]
     fn serialize_roundtrip() {
         let options = Options::default()
-            .set_learning_rate(0.2)
+            .set_learning_rate(0.5)
             .set_allow_missing_splits(true);
 
         // Serialize booster fields and non-default tree/node options.
@@ -332,7 +331,7 @@ mod tests {
             json,
             concat!(
                 r#"{"objective":"SquaredLoss","base_score":0.0,"max_bins":255,"parallel":true"#,
-                r#","seed":0,"learning_rate":0.2,"allow_missing_splits":true}"#
+                r#","seed":0,"learning_rate":0.5,"allow_missing_splits":true}"#
             )
         );
 

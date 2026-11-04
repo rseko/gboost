@@ -20,6 +20,7 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 /// Map a value to its 1-based bin index among the sorted `bins`.
 /// With `bins = [1, 2, 3]`: `value <= 1` → 1, `1 < value <= 2` → 2,
 /// `value > 2` → 3. NaN maps to 0.
+/// Bins that are outside the range of `I` type also map to 0.
 pub fn quantize<F: Float, I: PrimInt>(value: &F, bins: &[F]) -> I {
     if !value.is_nan() {
         let pos = bins.partition_point(|x| value > x) + 1;

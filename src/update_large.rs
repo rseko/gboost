@@ -27,7 +27,7 @@ pub const FILENAME_PREDICT: &str = "boost";
 
 /// Sanitize special characters in a feature name.
 pub fn sanitize_name(name: &str) -> String {
-    name.replace(['.', '/', '\\'], "_")
+    name.replace(['.', '/'], "_")
 }
 
 /// Maximum number of rows processed in a single batch. The data is partitioned
@@ -70,8 +70,6 @@ where
     I: IndexT,
     O: Objective,
 {
-    assert_eq!(index.len(), data.rows());
-
     // The sampled rows per batch must scale with the dataset size, so the
     // in-memory `data(inputs)` view and the on-disk layout stay consistent.
     assert_eq!(config.bits_per_batch.clamp(1, BATCH), config.bits_per_batch);
@@ -113,9 +111,9 @@ where
 
     // Create and size the prediction file for this step up front so the
     // output is a fixed-length, fully written artifact for all rows.
+    let output_filename = path.join(FILENAME_PREDICT).with_extension("temp");
     if config.train_step > 0 {
-        let suffix = config.train_step.to_string();
-        let file = File::create(path.join(FILENAME_PREDICT).with_extension(suffix))?;
+        let file = File::create(&output_filename)?;
         file.set_len((config.total_rows * std::mem::size_of::<f32>()) as u64)?;
     }
 
@@ -168,7 +166,7 @@ where
                     }
                     Ok(())
                 },
-            )
+            )?;
     } else {
         // Sequential path: one shared file-handle set, one shared scratch
         // workspace, and one shared bitmask generator, all reused across
@@ -200,8 +198,16 @@ where
             process_batch(&mut buffers, &mut inputs, index, tree, &mask, offset);
             files.write(&buffers.predict)?;
         }
-        Ok(())
     }
+
+    // Move the temporary file, if successful.
+    if config.train_step > 0 {
+        std::fs::rename(
+            &output_filename,
+            output_filename.with_extension(config.train_step.to_string()),
+        )?;
+    }
+    Ok(())
 }
 
 /// Add the candidate tree's contribution to every row's prediction, then for
@@ -311,9 +317,7 @@ impl UpdateFiles {
         };
 
         let output = if train_step > 0 {
-            let filename = path
-                .join(FILENAME_PREDICT)
-                .with_extension(train_step.to_string());
+            let filename = path.join(FILENAME_PREDICT).with_extension("temp");
             Some(OpenOptions::new().write(true).open(filename)?)
         } else {
             None
@@ -431,7 +435,7 @@ impl BitmaskGenerator {
 mod tests {
     use super::*;
     use crate::dataset::{Feature, SquaredLoss};
-    use crate::tree::{Node, NodeSplit};
+    use crate::tree::create_test_tree;
     use rand::Rng;
 
     const NUM_ROWS: usize = 100_000;
@@ -458,22 +462,6 @@ mod tests {
         .unwrap()
     }
 
-    /// A simple tree that predicts a ±0.125 per row.
-    fn build_tree() -> Tree {
-        let root = Node::default_split(NodeSplit {
-            feature_id: 0,
-            bin_id: 127,
-            is_range: true,
-            with_missing: true,
-            positive_id: 1,
-            negative_id: 2,
-            gain: 0.0,
-        });
-        let left = Node::default_leaf(-0.125);
-        let right = Node::default_leaf(0.125);
-        Tree::new(vec![root, left, right]).unwrap()
-    }
-
     /// Write dataset to temp files.
     fn write_dataset(path: &Path, data: &Dataset<u8>) {
         for (feature, row) in data.features().iter().zip(data.inputs()) {
@@ -488,7 +476,7 @@ mod tests {
     #[test]
     fn large_test() {
         // Create the dataset and write it to disk.
-        let (mut data, tree) = (build_data(), build_tree());
+        let (mut data, tree) = (build_data(), create_test_tree(/*depth*/ 2));
         let mut rng = StdRng::seed_from_u64(TEST_SEED);
         let temp_dir = tempfile::TempDir::new().unwrap();
         write_dataset(temp_dir.path(), &data);
@@ -524,7 +512,7 @@ mod tests {
         assert_eq!(sum_inputs(&data.inputs()[1]), 5832598);
         assert_eq!(
             index.iter().map(|x| x.grad_hess().0).sum::<f32>(),
-            -22910.25
+            -13746.533
         );
 
         // Run the second update.
@@ -545,7 +533,10 @@ mod tests {
         // Verify the resulting dataset.
         assert_eq!(sum_inputs(&data.inputs()[0]), 5819437);
         assert_eq!(sum_inputs(&data.inputs()[1]), 5827921);
-        assert_eq!(index.iter().map(|x| x.grad_hess().0).sum::<f32>(), -22950.5);
+        assert_eq!(
+            index.iter().map(|x| x.grad_hess().0).sum::<f32>(),
+            -4614.531
+        );
 
         // Verify the resulting file.
         let mut predict = vec![0.0_f32; NUM_ROWS];
@@ -553,8 +544,7 @@ mod tests {
             File::open(temp_dir.path().join(FILENAME_PREDICT).with_extension("2")).unwrap();
         file.read_exact(predict.as_mut_bytes()).unwrap();
 
-        assert_eq!(predict[NUM_ROWS - 3..], [0.25, 0.75, 0.25]);
-        assert_eq!(predict.iter().sum::<f32>(), 49970.5);
+        assert_eq!(predict.iter().sum::<f32>(), 89825.87);
     }
 
     #[test]

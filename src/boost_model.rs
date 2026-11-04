@@ -310,7 +310,7 @@ where
         // on-disk batch, so the `subsample` ratio is folded into the sample
         // size here and then reset: tree building sees an unsampled,
         // pre-sampled row set.
-        let batch_size = (options.tree_options.subsample.clamp(0.0, 1.0) * BATCH as f64).round();
+        let batch_size = (options.tree_options.subsample.clamp(0.0, 1.0) * BATCH as f32).round();
         let bits_per_batch = (batch_size as usize).max(1);
         let sample_rows = (rows * bits_per_batch / BATCH).max(1);
         options.tree_options.subsample = 1.0; // reset the subsample
@@ -490,7 +490,7 @@ mod tests {
         );
         assert_eq!(
             model.predict[..4],
-            [0.24033013, 0.24033013, 0.20896423, 0.24271369]
+            [0.24033014, 0.24033014, 0.20896423, 0.2427137]
         );
     }
 
@@ -589,8 +589,8 @@ mod tests {
                 .iter()
                 .fold(0_u64, |acc, part| acc ^ u64::from_le_bytes(*part))
         };
-        assert_eq!(checksum(1), 387_416_199_230_371_108);
-        assert_eq!(checksum(2), 12_201_151_743_841_195);
+        assert_eq!(checksum(1), 387_416_207_820_305_698);
+        assert_eq!(checksum(2), 12_201_181_808_612_248);
     }
 
     #[test]

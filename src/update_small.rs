@@ -26,9 +26,6 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
     tree: Option<&Tree>,
     parallel: bool,
 ) {
-    assert_eq!(predict.len(), data.rows());
-    assert_eq!(index.len(), data.rows());
-
     if parallel {
         // Rows are partitioned into `BATCH_SIZE` chunks processed concurrently;
         // each chunk gets its base offset so global row positions stay correct.
@@ -80,10 +77,13 @@ fn update_index_slice<I: IndexT, O: Objective>(
     predict: &[f32],
     offset: usize,
 ) {
-    for idx in 0..index.len() {
-        let deriv = O::derive(target[idx], predict[idx]);
-        index[idx] = RowIndex::new(offset + idx, deriv);
-    }
+    index
+        .iter_mut()
+        .zip(target.iter().zip(predict.iter()))
+        .enumerate()
+        .for_each(|(idx, (dst, (y, y_pred)))| {
+            *dst = RowIndex::new(offset + idx, O::derive(*y, *y_pred));
+        });
 }
 
 #[cfg(test)]

@@ -146,7 +146,7 @@ fn parse_node_split(text: &str, features: &[Feature]) -> Result<Node> {
             negative_id: fields.get("no").unwrap_or(&"").parse::<usize>()?,
         }),
         depth: 0,
-        cover: fields.get("cover").unwrap_or(&"").parse::<f32>()?,
+        cover: fields.get("cover").unwrap_or(&"0").parse::<f32>()?,
     })
 }
 
@@ -158,7 +158,7 @@ fn parse_node_leaf(text: &str) -> Result<Node> {
     Ok(Node {
         kind: NodeKind::Leaf(value),
         depth: 0,
-        cover: fields.get("cover").unwrap_or(&"").parse::<f32>()?,
+        cover: fields.get("cover").unwrap_or(&"0").parse::<f32>()?,
     })
 }
 

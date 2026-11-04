@@ -8,7 +8,7 @@ use gboost::boost_tree::{BoostTreeOptions, TreeBuilder};
 use gboost::dataset::{Dataset, Feature, IndexT, Objective, RowIndex, SquaredLoss as Loss};
 use gboost::histogram::Histogram;
 use gboost::quantize::{QuantFloat, bins_from, quantize_all};
-use gboost::tree::{Node, NodeSplit, Tree};
+use gboost::tree::{Node, NodeKind, NodeSplit, Tree};
 use gboost::update_small::update_small;
 
 const NUM_ROWS: usize = 1_000_000;
@@ -34,18 +34,26 @@ fn create_tree(rng: &mut StdRng, depth: u32) -> Tree {
     let mut nodes = vec![];
     let leaves = (1 << depth) / 2;
     for idx in 1..leaves {
-        nodes.push(Node::default_split(NodeSplit {
-            feature_id: rng.random_range(0..NUM_COLS),
-            bin_id: rng.random_range(0..NUM_BINS),
-            is_range: true,
-            with_missing: true,
-            positive_id: idx * 2 - 1,
-            negative_id: idx * 2,
-            gain: 0.0,
-        }));
+        nodes.push(Node {
+            kind: NodeKind::Split(NodeSplit {
+                feature_id: rng.random_range(0..NUM_COLS),
+                bin_id: rng.random_range(0..NUM_BINS),
+                is_range: true,
+                with_missing: true,
+                positive_id: idx * 2 - 1,
+                negative_id: idx * 2,
+                gain: 0.1 * idx as f32,
+            }),
+            depth: idx.ilog2(),
+            cover: 0.0,
+        });
     }
     for idx in 1..=leaves {
-        nodes.push(Node::default_leaf(idx as f32))
+        nodes.push(Node {
+            kind: NodeKind::Leaf(0.1 * idx as f32),
+            depth: depth - 1,
+            cover: 0.0,
+        });
     }
     Tree::new(nodes).unwrap()
 }

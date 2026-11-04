@@ -184,24 +184,6 @@ impl Node {
             _ => f32::NAN,
         }
     }
-
-    /// Default split node (used in tests).
-    pub fn default_split(split: NodeSplit) -> Self {
-        Self {
-            kind: NodeKind::Split(split),
-            depth: 0,
-            cover: 0.0,
-        }
-    }
-
-    /// Default leaf node (used in tests).
-    pub fn default_leaf(value: f32) -> Self {
-        Self {
-            kind: NodeKind::Leaf(value),
-            depth: 1,
-            cover: 0.0,
-        }
-    }
 }
 
 impl NodeSplit {
@@ -256,22 +238,30 @@ impl std::fmt::Display for Tree {
 
 /// Build a balanced tree (used in tests).
 #[allow(unused)]
-pub(crate) fn create_test_tree(depth: usize) -> Tree {
+pub(crate) fn create_test_tree(depth: u32) -> Tree {
     let mut nodes = vec![];
     let leaves = (1 << depth) / 2;
     for idx in 1..leaves {
-        nodes.push(Node::default_split(NodeSplit {
-            feature_id: idx - 1,
-            bin_id: idx,
-            is_range: true,
-            with_missing: false,
-            positive_id: idx * 2 - 1,
-            negative_id: idx * 2,
-            gain: 0.1 * idx as f32,
-        }));
+        nodes.push(Node {
+            kind: NodeKind::Split(NodeSplit {
+                feature_id: idx - 1,
+                bin_id: idx,
+                is_range: true,
+                with_missing: false,
+                positive_id: idx * 2 - 1,
+                negative_id: idx * 2,
+                gain: 0.1 * idx as f32,
+            }),
+            depth: idx.ilog2(),
+            cover: 0.0,
+        });
     }
     for idx in 1..=leaves {
-        nodes.push(Node::default_leaf(0.1 * idx as f32))
+        nodes.push(Node {
+            kind: NodeKind::Leaf(0.1 * idx as f32),
+            depth: depth - 1,
+            cover: 0.0,
+        });
     }
     Tree::new(nodes).unwrap()
 }
@@ -298,28 +288,21 @@ mod tests {
 
     #[test]
     fn invalid_tree() {
-        let make_split = |l, r| {
-            Node::default_split(NodeSplit {
-                feature_id: 0,
-                bin_id: 1,
-                is_range: true,
-                with_missing: false,
-                positive_id: l,
-                negative_id: r,
-                gain: 0.0,
-            })
-        };
+        let mut tree = create_test_tree(2);
 
         let empty_tree = Tree::new(vec![]);
         assert_eq!(empty_tree.unwrap_err().to_string(), "tree has no nodes");
 
-        let bad_tree_index = Tree::new(vec![make_split(1, 1)]);
+        update_root(&mut tree, |s| s.positive_id = 3);
+        let bad_tree_index = Tree::new(tree.nodes.clone());
         assert!(bad_tree_index.is_err());
 
-        let bad_tree_loop = Tree::new(vec![make_split(0, 1), Node::default_leaf(0.0)]);
+        update_root(&mut tree, |s| s.positive_id = 0);
+        let bad_tree_loop = Tree::new(tree.nodes.clone());
         assert!(bad_tree_loop.is_err());
 
-        let bad_tree_extra = Tree::new(vec![Node::default_leaf(0.0); 2]);
+        let leaves = tree.nodes.split_off(1);
+        let bad_tree_extra = Tree::new(leaves);
         assert!(bad_tree_extra.is_err());
     }
 

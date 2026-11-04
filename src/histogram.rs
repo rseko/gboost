@@ -27,29 +27,6 @@ pub struct Histogram {
 }
 
 impl Histogram {
-    /// Build an all-zero histogram for `features`, each feature covering
-    /// `feat.bins.len() + 1` bins (the value bins plus the missing bin).
-    /// Filter out features that are not present in `columns`.
-    pub fn new(features: &[Feature], columns: Option<&HashSet<usize>>) -> Self {
-        let splits = std::iter::once(0)
-            .chain(features.iter().enumerate().map(|(idx, feat)| {
-                if columns.is_none_or(|c| c.contains(&idx)) {
-                    feat.bins().len() + 1
-                } else {
-                    0
-                }
-            }))
-            .scan(0, |acc, size| {
-                *acc += size;
-                Some(*acc)
-            })
-            .collect::<Vec<_>>();
-        Self {
-            data: vec![(0.0, 0.0); *splits.last().unwrap()],
-            splits,
-        }
-    }
-
     /// Get full histogram data.
     pub fn data(&self) -> &[Item] {
         &self.data
@@ -159,6 +136,29 @@ impl Histogram {
         result
     }
 
+    /// Build an all-zero histogram for `features`, each feature covering
+    /// `feat.bins.len() + 1` bins (the value bins plus the missing bin).
+    /// Filter out features that are not present in `columns`.
+    pub(crate) fn new(features: &[Feature], columns: Option<&HashSet<usize>>) -> Self {
+        let splits = std::iter::once(0)
+            .chain(features.iter().enumerate().map(|(idx, feat)| {
+                if columns.is_none_or(|c| c.contains(&idx)) {
+                    feat.bins().len() + 1
+                } else {
+                    0
+                }
+            }))
+            .scan(0, |acc, size| {
+                *acc += size;
+                Some(*acc)
+            })
+            .collect::<Vec<_>>();
+        Self {
+            data: vec![(0.0, 0.0); *splits.last().unwrap()],
+            splits,
+        }
+    }
+
     /// Mutable histogram data (internal).
     #[allow(unused)]
     pub(crate) fn data_mut(&mut self) -> &mut [Item] {
@@ -196,10 +196,10 @@ impl<'a> Iterator for HistogramIter<'a> {
     type Item = usize;
 
     fn next(&mut self) -> Option<usize> {
+        let start = self.splits[self.index];
         while self.index + 1 < self.splits.len() {
             self.index += 1;
-            let (start, end) = (self.splits[self.index - 1], self.splits[self.index]);
-            if start != end {
+            if self.splits[self.index] != start {
                 return Some(self.index - 1);
             }
         }
