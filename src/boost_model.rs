@@ -12,7 +12,7 @@ use crate::boost_tree::TreeBuilder;
 use crate::dataset::{Dataset, Feature, FeatureKind, IndexT, Objective, RowIndex};
 use crate::options::Options;
 use crate::parser::{parse_model, parse_trees};
-use crate::quantize::{QuantFloat, Quantizer, quantize};
+use crate::quantize::{QuantFloat, bins_from, quantize, quantize_all};
 use crate::tree::{NodeKind, Tree};
 use crate::update_large::{
     BATCH, FILENAME_INPUT, FILENAME_TARGET, UpdateConfig, sanitize_name, update_large,
@@ -223,7 +223,7 @@ where
         // dataset inputs and the fitted boundaries replace the feature bins.
         let parallel = options.boost_options.parallel;
         let (all_rows, all_bins) =
-            Quantizer::quantize_all(inputs, options.boost_options.max_bins as usize, parallel);
+            quantize_all(inputs, options.boost_options.max_bins as usize, parallel);
 
         // Without caller-supplied descriptors, synthesize linear features
         // named by their column position.
@@ -405,7 +405,7 @@ impl ModelInit {
         let mut feature_file = File::create(self.path.join(FILENAME_INPUT).with_extension(suffix))?;
 
         // Fit the quantizer and write the quantized column to disk.
-        let bins_quant = Quantizer::fit_from(data, self.max_bins);
+        let bins_quant = bins_from(data, self.max_bins);
         let data_quant = data
             .iter()
             .map(|x| quantize::<F, T>(x, &bins_quant))

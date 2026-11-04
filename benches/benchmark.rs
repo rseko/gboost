@@ -7,7 +7,7 @@ use gboost::boost_node::BoostNodeOptions;
 use gboost::boost_tree::{BoostTreeOptions, TreeBuilder};
 use gboost::dataset::{Dataset, Feature, IndexT, Objective, RowIndex, SquaredLoss as Loss};
 use gboost::histogram::Histogram;
-use gboost::quantize::{QuantFloat, Quantizer};
+use gboost::quantize::{QuantFloat, bins_from, quantize_all};
 use gboost::tree::{Node, NodeSplit, Tree};
 use gboost::update_small::update_small;
 
@@ -116,10 +116,10 @@ fn bench_quant<T: QuantFloat>(c: &mut Criterion, prefix: &str) {
         .collect::<Vec<T>>();
 
     c.bench_function(&name("bins:1"), |b| {
-        b.iter(|| Quantizer::fit_from(&data, NUM_BINS));
+        b.iter(|| bins_from(&data, NUM_BINS));
     });
     c.bench_function(&name("quantize:1"), |b| {
-        b.iter(|| Quantizer::quantize_all::<u8>(&[&data], NUM_BINS, false));
+        b.iter(|| quantize_all::<T, u8>(&[&data], NUM_BINS, false));
     });
 }
 
