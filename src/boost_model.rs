@@ -47,10 +47,18 @@ pub enum BoostError {
     /// A large-dataset operation was requested without a persistence path.
     #[error("missing persistence path")]
     MissingPath,
+    /// A `u64` row index was requested but the `large-index` feature is disabled.
+    #[error("dataset size exceeds the {0} row limit")]
+    DatasetTooLarge(usize),
 }
 
 /// A `Result` with the booster-specific error type.
 pub type BoostResult<T> = std::result::Result<T, BoostError>;
+
+/// An integer bin-index type: a primitive integer convertible to and from
+/// `usize` and byte-serializable (`u8` for small bins, `u16` for large).
+pub trait BinT: PrimInt + Copy + Into<usize> + IntoBytes + FromBytes + Send + Sync {}
+impl<T: PrimInt + Copy + Into<usize> + IntoBytes + FromBytes + Send + Sync> BinT for T {}
 
 /// One gradient-boosting learner: it owns the (possibly offloaded) training
 /// data, the per-row gradient/hessian index, the running predictions, and
@@ -64,12 +72,7 @@ pub struct BoostModel<T, I, O> {
     offload: Option<UpdateConfig>,
 }
 
-impl<T, I, O> BoostModel<T, I, O>
-where
-    T: PrimInt + Copy + Into<usize> + IntoBytes + FromBytes + Send + Sync,
-    I: IndexT,
-    O: Objective,
-{
+impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
     /// Predict over a batch of raw (unquantized) feature columns.
     ///
     /// `inputs` holds one column per feature, in feature order; every

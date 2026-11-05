@@ -107,11 +107,9 @@ fn bench_main<T: IndexT>(c: &mut Criterion, prefix: &str) {
     });
 }
 
-fn bench_index32(c: &mut Criterion) {
+fn bench_index_types(c: &mut Criterion) {
     bench_main::<u32>(c, "u32/");
-}
-
-fn bench_index64(c: &mut Criterion) {
+    #[cfg(feature = "large-index")]
     bench_main::<u64>(c, "u64/");
 }
 
@@ -133,20 +131,21 @@ fn bench_quant<T: QuantFloat>(c: &mut Criterion, prefix: &str) {
     });
 }
 
-fn bench_float16(c: &mut Criterion) {
+fn bench_float_types(c: &mut Criterion) {
     bench_quant::<f16>(c, "f16/");
+    bench_quant::<f32>(c, "f32/");
 }
 
-fn bench_float32(c: &mut Criterion) {
-    bench_quant::<f32>(c, "f32/");
+fn bench_config() -> Criterion {
+    Criterion::default()
+        .sample_size(10)
+        .measurement_time(Duration::from_secs(2))
+        .warm_up_time(Duration::from_millis(100))
 }
 
 criterion_group! {
     name = benches;
-    config = Criterion::default()
-        .sample_size(10)
-        .measurement_time(Duration::from_secs(2))
-        .warm_up_time(Duration::from_millis(100));
-    targets = bench_index32, bench_index64, bench_float16, bench_float32
+    config = bench_config();
+    targets = bench_index_types, bench_float_types
 }
 criterion_main!(benches);

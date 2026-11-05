@@ -215,9 +215,9 @@ pub trait IndexT: Copy + Send + Sync {
     fn to_usize(&self) -> usize;
 }
 
-impl IndexT for u64 {
+impl IndexT for u32 {
     fn from_usize(index: usize) -> Self {
-        index as u64
+        index as u32
     }
 
     fn to_usize(&self) -> usize {
@@ -225,9 +225,10 @@ impl IndexT for u64 {
     }
 }
 
-impl IndexT for u32 {
+#[cfg(feature = "large-index")]
+impl IndexT for u64 {
     fn from_usize(index: usize) -> Self {
-        index as u32
+        index as u64
     }
 
     fn to_usize(&self) -> usize {
@@ -406,9 +407,12 @@ mod tests {
             assert_eq!(item.grad_hess(), (0.0, 1.0));
         }
 
-        let other = RowIndex::<u64, LogLoss>::new_array(1);
-        assert_eq!(other[0].as_usize(), 0);
-        assert_eq!(other[0].grad_hess(), (0.5, 0.25));
+        #[cfg(feature = "large-index")]
+        {
+            let other = RowIndex::<u64, LogLoss>::new_array(1);
+            assert_eq!(other[0].as_usize(), 0);
+            assert_eq!(other[0].grad_hess(), (0.5, 0.25));
+        }
     }
 
     #[test]
