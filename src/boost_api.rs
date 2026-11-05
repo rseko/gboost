@@ -25,6 +25,9 @@ use crate::quantize::QuantFloat;
 /// [`Booster::predict`]. The trait is `Send`, so `Box<dyn Booster<F>>` can
 /// be shared across threads.
 pub trait Booster<F: QuantFloat>: Send {
+    /// Grow up to `max_rounds` boosting rounds in a single call.
+    fn fit(&mut self, max_rounds: usize) -> BoostResult<()>;
+
     /// Grow one boosting round and fold the new tree into the model.
     ///
     /// Returns `Ok(false)` when the round produced no tree (no gain), which
@@ -79,6 +82,15 @@ pub fn new_with_features<F: QuantFloat>(
 /// methods; `F` is unconstrained at this layer beyond what the trait
 /// already demands.
 impl<F: QuantFloat, T: BinT, I: IndexT, O: Objective> Booster<F> for BoostModel<T, I, O> {
+    fn fit(&mut self, max_rounds: usize) -> BoostResult<()> {
+        for _ in 0..max_rounds {
+            if !self.fit_next()? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     fn fit_next(&mut self) -> BoostResult<bool> {
         BoostModel::<T, I, O>::fit_next(self)
     }
@@ -162,6 +174,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::boost_model::FILENAME_MODEL;
     use rand::{RngExt, SeedableRng, rngs::StdRng};
 
     const NUM_ROWS: usize = 1_000;
@@ -258,5 +271,38 @@ mod tests {
         let log_loss = Options::default().set_objective(ObjectiveKind::LogLoss);
         let res2 = dispatch_objective::<f32, u8, u32>(log_loss, &[], &[], None);
         assert!(res2.is_err());
+    }
+
+    #[test]
+    fn fit_then_predict() {
+        let (data, target) = build_data();
+        let inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
+
+        let mut booster = new_booster::<f32>(Options::default(), &inputs, &target).unwrap();
+        booster.fit(50).unwrap();
+
+        let preds = booster.predict(&inputs).unwrap();
+        let mean_error = preds
+            .iter()
+            .zip(&target)
+            .map(|(p, t)| (p - t).abs())
+            .sum::<f32>()
+            / NUM_ROWS as f32;
+        // Deterministic seed and fixed rounds make the value stable.
+        assert_eq!(mean_error, 0.0946346);
+    }
+
+    #[test]
+    fn fit_error() {
+        let (data, target) = build_data();
+        let inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let options = Options::default()
+            .set_persist_path(Some(temp_dir.path().into()));
+
+        let mut booster = new_booster::<f32>(options, &inputs, &target).unwrap();
+        booster.fit(1).unwrap();
+        std::fs::remove_file(temp_dir.path().join(FILENAME_MODEL)).unwrap();
+        assert!(booster.fit(1).is_err());
     }
 }
