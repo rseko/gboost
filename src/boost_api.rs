@@ -24,7 +24,7 @@ use crate::quantize::QuantFloat;
 /// `F` is the float type of the raw feature columns passed to
 /// [`Booster::predict`]. The trait is `Send`, so `Box<dyn Booster<F>>` can
 /// be shared across threads.
-pub trait Booster<F: QuantFloat>: Send {
+pub trait Booster<F: QuantFloat>: Send + Sync {
     /// Grow up to `max_rounds` boosting rounds in a single call.
     fn fit(&mut self, max_rounds: usize) -> BoostResult<()>;
 
