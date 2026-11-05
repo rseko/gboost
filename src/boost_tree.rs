@@ -23,15 +23,15 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BoostTreeOptions {
     /// Learning rate defines the update step size.
-    pub learning_rate: f32,
+    pub learning_rate: f64,
     /// Select a subset of rows for new trees.
-    pub subsample: f32,
+    pub subsample: f64,
     /// Select a subset of features for new trees.
-    pub colsample_bytree: f32,
+    pub colsample_bytree: f64,
     /// Select a subset of features for each level.
-    pub colsample_bylevel: f32,
+    pub colsample_bylevel: f64,
     /// Select a subset of features for new splits.
-    pub colsample_bynode: f32,
+    pub colsample_bynode: f64,
     /// Maximum depth of a tree (`0` means no limit).
     pub max_depth: usize,
     /// Maximum number of leaves in a tree (`0` means no limit).
@@ -246,7 +246,7 @@ where
         for item in cannot_split {
             let (grad, hess) = (item.value.stats.gradient, item.value.stats.hessian);
             let (l1, l2) = (self.node_options.reg_alpha, self.node_options.reg_lambda);
-            let weight = self.tree_options.learning_rate as f64 * apply_l1(grad, l1) / (hess + l2);
+            let weight = self.tree_options.learning_rate * apply_l1(grad, l1) / (hess + l2);
 
             self.result_nodes.insert(
                 item.index,
@@ -399,8 +399,8 @@ where
 }
 
 /// Number of items to keep for a subsample ratio, clamped to at least one.
-fn get_sample_size(total: usize, ratio: f32) -> usize {
-    ((total as f32 * ratio).round() as usize).max(1)
+fn get_sample_size(total: usize, ratio: f64) -> usize {
+    ((total as f64 * ratio).round() as usize).max(1)
 }
 
 /// One entry in the work queue: a node's state plus its bookkeeping.
@@ -586,15 +586,15 @@ mod tests {
             tree.to_string(None),
             concat!(
                 "0:[14 <= 5] yes=1,no=2,gain=1.8308164,cover=1000\n",
-                "    1:value=-0.011305539,cover=575\n",
+                "    1:value=-0.011305538,cover=575\n",
                 "    2:[5 <= 2] yes=3,no=4,gain=1.399197,cover=425\n",
                 "        3:value=-0.015970366,cover=102\n",
                 "        4:[13 <= 7] yes=5,no=6,gain=1.6376567,cover=323\n",
                 "            5:[5 <= 6] yes=7,no=8,gain=2.3093631,cover=261\n",
                 "                7:[15 <= 3 | null] yes=9,no=10,gain=2.380442,cover=140\n",
-                "                    9:value=0.11034738,cover=54\n",
+                "                    9:value=0.110347375,cover=54\n",
                 "                    10:value=0.029982187,cover=86\n",
-                "                8:value=0.004391332,cover=121\n",
+                "                8:value=0.0043913317,cover=121\n",
                 "            6:value=-0.019494265,cover=62",
             )
         );

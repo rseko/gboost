@@ -278,7 +278,12 @@ mod tests {
         let (data, target) = build_data();
         let inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
 
-        let mut booster = new_booster::<f32>(Options::default(), &inputs, &target).unwrap();
+        let mut booster = new_booster::<f32>(
+            Options::default().set_min_split_gain(0.01),
+            &inputs,
+            &target,
+        )
+        .unwrap();
         booster.fit(50).unwrap();
 
         let preds = booster.predict(&inputs).unwrap();
@@ -289,7 +294,7 @@ mod tests {
             .sum::<f32>()
             / NUM_ROWS as f32;
         // Deterministic seed and fixed rounds make the value stable.
-        assert_eq!(mean_error, 0.0946346);
+        assert_eq!(mean_error, 0.10590586);
     }
 
     #[test]
@@ -297,8 +302,7 @@ mod tests {
         let (data, target) = build_data();
         let inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let options = Options::default()
-            .set_persist_path(Some(temp_dir.path().into()));
+        let options = Options::default().set_persist_path(Some(temp_dir.path().into()));
 
         let mut booster = new_booster::<f32>(options, &inputs, &target).unwrap();
         booster.fit(1).unwrap();

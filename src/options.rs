@@ -129,31 +129,31 @@ impl Options {
     // ----- `BoostTreeOptions` setters ------------------------------------------------------------
 
     /// Set the learning rate (per-tree update step size).
-    pub fn set_learning_rate(mut self, learning_rate: f32) -> Self {
+    pub fn set_learning_rate(mut self, learning_rate: f64) -> Self {
         self.tree_options.learning_rate = learning_rate;
         self
     }
 
     /// Set the row subsampling fraction (`< 1.0` samples a subset).
-    pub fn set_subsample(mut self, subsample: f32) -> Self {
+    pub fn set_subsample(mut self, subsample: f64) -> Self {
         self.tree_options.subsample = subsample;
         self
     }
 
     /// Set the per-tree feature subsampling fraction.
-    pub fn set_colsample_bytree(mut self, colsample_bytree: f32) -> Self {
+    pub fn set_colsample_bytree(mut self, colsample_bytree: f64) -> Self {
         self.tree_options.colsample_bytree = colsample_bytree;
         self
     }
 
     /// Set the per-level feature subsampling fraction.
-    pub fn set_colsample_bylevel(mut self, colsample_bylevel: f32) -> Self {
+    pub fn set_colsample_bylevel(mut self, colsample_bylevel: f64) -> Self {
         self.tree_options.colsample_bylevel = colsample_bylevel;
         self
     }
 
     /// Set the per-node feature subsampling fraction.
-    pub fn set_colsample_bynode(mut self, colsample_bynode: f32) -> Self {
+    pub fn set_colsample_bynode(mut self, colsample_bynode: f64) -> Self {
         self.tree_options.colsample_bynode = colsample_bynode;
         self
     }
