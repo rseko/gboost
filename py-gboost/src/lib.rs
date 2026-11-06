@@ -273,6 +273,16 @@ impl GradientBooster {
 
         Ok(scores.into_pyarray(py).into_any())
     }
+
+    /// Mean loss of the current predictions against the training labels.
+    ///
+    /// Returns `None` when the model has not been trained.
+    fn loss(&self) -> Option<f32> {
+        self.booster
+            .as_ref()
+            .map(|b| b.loss())
+            .map(|a| a.iter().sum::<f32>() / a.len() as f32)
+    }
 }
 
 /// Validate that `x` is column-major (Fortran-order) and return a single flat

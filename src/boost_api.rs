@@ -40,6 +40,12 @@ pub trait Booster<F: QuantFloat>: Send + Sync {
     /// must have the same length. Each row's prediction is the configured
     /// base score plus the sum of the leaf values the row lands in.
     fn predict(&self, inputs: &[&[F]]) -> BoostResult<Vec<f32>>;
+
+    /// Per-row loss of the current predictions against the true labels.
+    ///
+    /// Returns one value per row, in row order, each computed by the
+    /// configured objective's `loss(y, y_pred)`.
+    fn loss(&self) -> Vec<f32>;
 }
 
 /// Build a boxed, object-safe booster over in-memory training columns.
@@ -97,6 +103,10 @@ impl<F: QuantFloat, T: BinT, I: IndexT, O: Objective> Booster<F> for BoostModel<
 
     fn predict(&self, inputs: &[&[F]]) -> BoostResult<Vec<f32>> {
         BoostModel::<T, I, O>::predict(self, inputs)
+    }
+
+    fn loss(&self) -> Vec<f32> {
+        BoostModel::<T, I, O>::loss(self)
     }
 }
 
@@ -287,14 +297,14 @@ mod tests {
         booster.fit(50).unwrap();
 
         let preds = booster.predict(&inputs).unwrap();
-        let mean_error = preds
+        let errs = target
             .iter()
-            .zip(&target)
-            .map(|(p, t)| (p - t).abs())
-            .sum::<f32>()
-            / NUM_ROWS as f32;
-        // Deterministic seed and fixed rounds make the value stable.
-        assert_eq!(mean_error, 0.10590586);
+            .zip(&preds)
+            .map(|(y, y_pred)| (y - y_pred).abs())
+            .collect::<Vec<_>>();
+        let mean = |a: Vec<f32>| a.iter().sum::<f32>() / a.len() as f32;
+        assert_eq!(mean(errs), 0.10590586);
+        assert_eq!(mean(booster.loss()), 0.008633999);
     }
 
     #[test]

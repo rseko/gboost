@@ -73,6 +73,20 @@ pub struct BoostModel<T, I, O> {
 }
 
 impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
+    /// Per-row loss of the stored predictions against the true labels.
+    ///
+    /// Returns one value per row, in row order, each computed by the
+    /// configured objective's `loss(y, y_pred)` on the row's label and
+    /// the row's current prediction.
+    pub fn loss(&self) -> Vec<f32> {
+        self.data
+            .target()
+            .iter()
+            .zip(&self.predict)
+            .map(|(y, y_pred)| O::loss(*y, *y_pred))
+            .collect()
+    }
+
     /// Predict over a batch of raw (unquantized) feature columns.
     ///
     /// `inputs` holds one column per feature, in feature order; every
@@ -674,13 +688,11 @@ mod tests {
             }
 
             let predict = model.predict(&inputs).unwrap();
-            let mean_error = predict
-                .iter()
-                .zip(&target)
-                .map(|(a, b)| (a - b).abs())
-                .sum::<f32>()
-                / predict.len() as f32;
-            assert_eq!(mean_error, 0.22513878);
+            for (i, (y1, y2)) in predict.iter().zip(&model.predict).enumerate() {
+                assert!((y1 - y2).abs() < 1e-6, "{i}: {y1} != {y2}");
+            }
+            let mean = |a: Vec<f32>| a.iter().sum::<f32>() / a.len() as f32;
+            assert_eq!(mean(model.loss()), 0.034740813);
         }
     }
 
