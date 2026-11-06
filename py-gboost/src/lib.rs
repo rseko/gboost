@@ -6,9 +6,9 @@
 //! - `y` a 1-D float32 target vector,
 //! - `predict` returns a 1-D float32 score array.
 //!
-//! The core works on column-major `inputs[col][row]` slices, so `x` must be a
-//! Fortran-order array, e.g. `np.asfortranarray(x)`; row-major or strided
-//! arrays are rejected.
+//! The core works on column-major `inputs[col][row]` slices, so `x` should be
+//! a Fortran-order array (e.g. `np.asfortranarray(x)`) for zero-copy; row-major
+//! or strided inputs are transposed into column-major internally.
 
 use gboost::boost_api::{Booster, new_booster, new_with_features};
 use gboost::dataset::Feature;
@@ -17,6 +17,8 @@ use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMetho
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
+use std::collections::HashSet;
+use std::path::PathBuf;
 
 /// Gradient boosting learner backed by the Rust core.
 #[pyclass]
@@ -36,6 +38,7 @@ impl GradientBooster {
         objective = "squaredloss",
         base_score = 0.0,
         max_bins = 255,
+        persist_path = None,
         parallel = true,
         seed = 0,
         learning_rate = 0.3,
@@ -60,6 +63,7 @@ impl GradientBooster {
         objective: &str,
         base_score: f64,
         max_bins: u16,
+        persist_path: Option<&str>,
         parallel: bool,
         seed: u64,
         // BoostTreeOptions
@@ -104,6 +108,7 @@ impl GradientBooster {
             .set_objective(objective)
             .set_base_score(base_score as f32)
             .set_max_bins(max_bins)
+            .set_persist_path(persist_path.map(PathBuf::from))
             .set_parallel(parallel)
             .set_seed(seed)
             .set_learning_rate(learning_rate)
@@ -161,6 +166,13 @@ impl GradientBooster {
         )?;
         dict.set_item("base_score", o.boost_options.base_score)?;
         dict.set_item("max_bins", o.boost_options.max_bins)?;
+        dict.set_item(
+            "persist_path",
+            o.boost_options
+                .persist_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned()),
+        )?;
         dict.set_item("parallel", o.boost_options.parallel)?;
         dict.set_item("seed", o.boost_options.seed)?;
         dict.set_item("learning_rate", o.tree_options.learning_rate)?;
@@ -198,7 +210,7 @@ impl GradientBooster {
         x: PyReadonlyArray2<f32>,
         y: PyReadonlyArray1<f32>,
     ) -> PyResult<()> {
-        let flat = column_major(&x)?;
+        let flat = column_major(&x);
         let rows = x.as_array().shape()[0];
         let inputs: Vec<&[f32]> = flat.chunks_exact(rows).collect();
 
@@ -210,7 +222,7 @@ impl GradientBooster {
         }
 
         let options = self.options.clone();
-        let onehot = self.onehot_columns.clone();
+        let onehot: HashSet<usize> = self.onehot_columns.iter().copied().collect();
         let iterations = self.iterations;
 
         let booster = py
@@ -251,8 +263,9 @@ impl GradientBooster {
 
     /// Score `x` (rows x cols) with the trained model.
     ///
-    /// Errors if the model is untrained, if `x` is not Fortran-order, or if
-    /// `x` has a different number of columns than the training data.
+    /// Errors if the model is untrained or if `x` has a different number of
+    /// columns than the training data. `x` may be row-major; a non-contiguous
+    /// input is transposed internally.
     fn predict<'py>(
         &self,
         py: Python<'py>,
@@ -263,7 +276,7 @@ impl GradientBooster {
             .as_ref()
             .ok_or_else(|| PyValueError::new_err("model is not trained"))?;
 
-        let flat = column_major(&x)?;
+        let flat = column_major(&x);
         let rows = x.as_array().shape()[0];
         let inputs: Vec<&[f32]> = flat.chunks_exact(rows).collect();
 
@@ -285,16 +298,29 @@ impl GradientBooster {
     }
 }
 
-/// Validate that `x` is column-major (Fortran-order) and return a single flat
-/// slice over its data. Non-column-major arrays (row-major or strided) are
-/// rejected; use `np.asfortranarray(x)` first.
-fn column_major<'a>(x: &'a PyReadonlyArray2<f32>) -> PyResult<&'a [f32]> {
-    if !x.is_fortran_contiguous() {
-        return Err(PyValueError::new_err(
-            "x must be column-major; pass np.asfortranarray(x)",
-        ));
+enum ColumnMajor<'a> {
+    Borrowed(&'a [f32]),
+    Owned(Vec<f32>),
+}
+
+impl std::ops::Deref for ColumnMajor<'_> {
+    type Target = [f32];
+    fn deref(&self) -> &[f32] {
+        match self {
+            Self::Borrowed(s) => s,
+            Self::Owned(v) => v,
+        }
     }
-    Ok(x.as_slice().expect("F-contiguous array must be sliceable"))
+}
+
+/// Return `x` as a flat column-major slice. Zero-copy when `x` is already
+/// Fortran-contiguous; otherwise transposes into a new `Vec`.
+fn column_major<'a>(x: &'a PyReadonlyArray2<f32>) -> ColumnMajor<'a> {
+    if x.is_fortran_contiguous() {
+        return ColumnMajor::Borrowed(x.as_slice().unwrap());
+    }
+    let flat = x.as_array().t().iter().copied().collect::<Vec<f32>>();
+    ColumnMajor::Owned(flat)
 }
 
 #[pymodule]
