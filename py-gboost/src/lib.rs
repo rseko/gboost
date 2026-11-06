@@ -11,10 +11,11 @@
 //! or strided inputs are transposed into column-major internally.
 
 use gboost::boost_api::{Booster, new_booster, new_with_features};
+use gboost::boost_model::BoostError;
 use gboost::dataset::Feature;
 use gboost::options::{ObjectiveKind, Options};
 use numpy::{IntoPyArray, PyReadonlyArray1, PyReadonlyArray2, PyUntypedArrayMethods};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyIOError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyModule};
 use std::collections::HashSet;
@@ -61,7 +62,7 @@ impl GradientBooster {
         iterations: usize,
         // BoosterOptions
         objective: &str,
-        base_score: f64,
+        base_score: f32,
         max_bins: u16,
         persist_path: Option<&str>,
         parallel: bool,
@@ -106,7 +107,7 @@ impl GradientBooster {
 
         let options = Options::default()
             .set_objective(objective)
-            .set_base_score(base_score as f32)
+            .set_base_score(base_score)
             .set_max_bins(max_bins)
             .set_persist_path(persist_path.map(PathBuf::from))
             .set_parallel(parallel)
@@ -214,9 +215,7 @@ impl GradientBooster {
         let rows = x.as_array().shape()[0];
         let inputs: Vec<&[f32]> = flat.chunks_exact(rows).collect();
 
-        let target = y
-            .as_slice()
-            .map_err(|_| PyValueError::new_err("y must be contiguous"))?;
+        let target = target_flat(&y);
         if target.iter().any(|v| v.is_nan()) {
             return Err(PyValueError::new_err("target contains NaN values"));
         }
@@ -226,22 +225,21 @@ impl GradientBooster {
         let iterations = self.iterations;
 
         let booster = py
-            .detach(|| {
+            .detach(|| -> Result<Box<dyn Booster<f32>>, PyErr> {
                 let result = if onehot.is_empty() {
-                    new_booster(options, &inputs, target)
+                    new_booster(options, &inputs, &target)
                 } else {
                     let new_feature = |i: usize| match onehot.contains(&i) {
                         true => Feature::onehot(None, vec![]),
                         false => Feature::linear(None, vec![]),
                     };
                     let features = (0..inputs.len()).map(new_feature).collect();
-                    new_with_features(options, &inputs, target, features)
+                    new_with_features(options, &inputs, &target, features)
                 };
-                let mut b = result.map_err(|e| e.to_string())?;
-                b.fit(iterations).map_err(|e| e.to_string())?;
+                let mut b = result.map_err(boost_error_to_py)?;
+                b.fit(iterations).map_err(boost_error_to_py)?;
                 Ok(b)
-            })
-            .map_err(|e: String| PyValueError::new_err(e))?;
+            })?;
 
         self.booster = Some(booster);
         Ok(())
@@ -257,8 +255,7 @@ impl GradientBooster {
             .as_mut()
             .ok_or_else(|| PyValueError::new_err("model is not trained"))?;
 
-        py.detach(|| booster.fit_next().map_err(|e| e.to_string()))
-            .map_err(|e: String| PyValueError::new_err(e))
+        py.detach(|| booster.fit_next().map_err(boost_error_to_py))
     }
 
     /// Score `x` (rows x cols) with the trained model.
@@ -281,9 +278,7 @@ impl GradientBooster {
         let inputs: Vec<&[f32]> = flat.chunks_exact(rows).collect();
 
         let scores = py
-            .detach(|| booster.predict(&inputs).map_err(|e| e.to_string()))
-            .map_err(|e: String| PyValueError::new_err(e))?;
-
+            .detach(|| booster.predict(&inputs).map_err(boost_error_to_py))?;
         Ok(scores.into_pyarray(py).into_any())
     }
 
@@ -298,12 +293,22 @@ impl GradientBooster {
     }
 }
 
-enum ColumnMajor<'a> {
+/// Map a booster error to a Python exception: `OSError` for I/O failures,
+/// `ValueError` otherwise.
+fn boost_error_to_py(err: BoostError) -> PyErr {
+    match err {
+        BoostError::Io(_) => PyIOError::new_err(err.to_string()),
+        other => PyValueError::new_err(other.to_string()),
+    }
+}
+
+/// A flat `f32` buffer: either a zero-copy slice or a copied `Vec`.
+enum FlatF32<'a> {
     Borrowed(&'a [f32]),
     Owned(Vec<f32>),
 }
 
-impl std::ops::Deref for ColumnMajor<'_> {
+impl std::ops::Deref for FlatF32<'_> {
     type Target = [f32];
     fn deref(&self) -> &[f32] {
         match self {
@@ -315,12 +320,20 @@ impl std::ops::Deref for ColumnMajor<'_> {
 
 /// Return `x` as a flat column-major slice. Zero-copy when `x` is already
 /// Fortran-contiguous; otherwise transposes into a new `Vec`.
-fn column_major<'a>(x: &'a PyReadonlyArray2<f32>) -> ColumnMajor<'a> {
+fn column_major<'a>(x: &'a PyReadonlyArray2<f32>) -> FlatF32<'a> {
     if x.is_fortran_contiguous() {
-        return ColumnMajor::Borrowed(x.as_slice().unwrap());
+        return FlatF32::Borrowed(x.as_slice().unwrap());
     }
     let flat = x.as_array().t().iter().copied().collect::<Vec<f32>>();
-    ColumnMajor::Owned(flat)
+    FlatF32::Owned(flat)
+}
+
+/// Return `y` as a flat slice. Zero-copy when contiguous; otherwise copies.
+fn target_flat<'a>(y: &'a PyReadonlyArray1<f32>) -> FlatF32<'a> {
+    if y.is_contiguous() {
+        return FlatF32::Borrowed(y.as_slice().unwrap());
+    }
+    FlatF32::Owned(y.as_array().iter().copied().collect())
 }
 
 #[pymodule]
