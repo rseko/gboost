@@ -1,0 +1,137 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "Upload to TestPyPI instead of PyPI"
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: linux-x86_64,   runner: ubuntu-latest,    python: "3.11" }
+          - { label: linux-x86_64,   runner: ubuntu-latest,    python: "3.12" }
+          - { label: linux-x86_64,   runner: ubuntu-latest,    python: "3.13" }
+          - { label: linux-aarch64,  runner: ubuntu-24.04-arm, python: "3.11" }
+          - { label: linux-aarch64,  runner: ubuntu-24.04-arm, python: "3.12" }
+          - { label: linux-aarch64,  runner: ubuntu-24.04-arm, python: "3.13" }
+          - { label: macos-arm64,    runner: macos-latest,     python: "3.11" }
+          - { label: macos-arm64,    runner: macos-latest,     python: "3.12" }
+          - { label: macos-arm64,    runner: macos-latest,     python: "3.13" }
+          - { label: windows-x86_64, runner: windows-latest,   python: "3.11" }
+          - { label: windows-x86_64, runner: windows-latest,   python: "3.12" }
+          - { label: windows-x86_64, runner: windows-latest,   python: "3.13" }
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.label }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.label }}-cargo-
+
+      - name: Install maturin
+        run: python -m pip install -U pip maturin
+
+      - name: Build wheel
+        shell: bash
+        run: |
+          maturin build --release --manifest-path py-gboost/Cargo.toml -o wheels
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: wheels-${{ matrix.label }}-py${{ matrix.python }}
+          path: wheels/*.whl
+          if-no-files-found: error
+
+  sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install maturin
+        run: python3 -m pip install -U pip maturin
+
+      - name: Build sdist
+        run: maturin sdist --manifest-path py-gboost/Cargo.toml --out dist
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: [build, sdist]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: "wheels-*"
+          path: dist
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sdist
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: Install twine
+        run: python -m pip install -U pip twine
+
+      - name: Check with twine
+        run: twine check dist/*
+
+      - name: Upload to TestPyPI
+        if: inputs.testpypi == 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.TEST_PYPI_API_TOKEN }}
+        run: twine upload --repository-url https://test.pypi.org/legacy/ dist/*
+
+      - name: Upload to PyPI
+        if: inputs.testpypi != 'true'
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+        run: twine upload dist/*

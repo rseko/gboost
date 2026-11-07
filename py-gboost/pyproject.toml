@@ -1,10 +1,20 @@
+[project]
+name = "gboostrs"
+description = "Python bindings for the gboost gradient boosting library"
+requires-python = ">=3.9"
+dynamic = ["version"]
+license = "MIT"
+authors = [{ name = "rseko" }]
+readme = "README.md"
+keywords = ["gradient-boosting", "machine-learning", "decision-tree"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+urls = { Repository = "https://github.com/rseko/gboost" }
+dependencies = ["numpy"]
+
 [build-system]
 requires = ["maturin>=1,<2"]
 build-backend = "maturin"
-
-[project]
-name = "py-gboost"
-version = "0.1.0"
-description = "Python bindings for the gboost gradient boosting library"
-requires-python = ">=3.9"
-license = { text = "MIT" }
