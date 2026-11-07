@@ -55,8 +55,8 @@ pub trait Booster<F: QuantFloat>: Send + Sync {
 ///
 /// # Errors
 ///
-/// Returns an error if the data is inconsistent (see [`BoostError::Dataset`])
-/// or if the target is too large (see [`BoostError::DatasetTooLarge`]).
+/// Returns an error if the data is inconsistent or if the target has more
+/// than `u32::MAX` rows (see the `large-index` feature).
 pub fn new_booster<F: QuantFloat>(
     options: Options,
     inputs: &[&[F]],

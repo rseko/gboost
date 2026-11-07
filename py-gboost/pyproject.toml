@@ -6,5 +6,5 @@ build-backend = "maturin"
 name = "py-gboost"
 version = "0.1.0"
 description = "Python bindings for the gboost gradient boosting library"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { text = "MIT" }
