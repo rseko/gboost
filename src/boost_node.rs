@@ -38,7 +38,7 @@ impl Default for BoostNodeOptions {
     fn default() -> Self {
         Self {
             reg_alpha: 0.0,
-            reg_lambda: 0.0,
+            reg_lambda: 1.0,
             min_split_gain: 0.0,
             min_child_weight: 1.0,
             allow_missing_splits: false,
@@ -472,12 +472,12 @@ mod tests {
             min_split_gain: v,
             ..Default::default()
         };
-        let res1 = test_find_split(&build_splittable(), None, &options(0.32));
+        let res1 = test_find_split(&build_splittable(), None, &options(0.24));
         assert!(res1.is_none(), "{res1:?}");
 
-        let res2 = test_find_split(&build_splittable(), None, &options(0.3));
+        let res2 = test_find_split(&build_splittable(), None, &options(0.22));
         assert!(res2.is_some(), "{res2:?}");
-        assert_eq!(res2.unwrap().gain, 0.3125);
+        assert_eq!(res2.unwrap().gain, 0.23125);
     }
 
     #[test]
@@ -487,16 +487,16 @@ mod tests {
             ..Default::default()
         };
         let mut splittable = build_splittable();
-        splittable.histogram.data_mut()[2].0 = -1.0;
+        splittable.histogram.data_mut()[2].0 = -2.0;
         assert_eq!(
             test_find_split(&splittable, None, &options(2.0)),
             Some(SplitCandidate {
                 feature_id: 0,
                 bin_id: 2,
                 with_missing: false,
-                positive: SplitStats::new(-0.75, 3.0, 0.1875),
-                negative: SplitStats::new(2.0, 2.0, 2.0),
-                gain: 2.1875,
+                positive: SplitStats::new(-1.75, 3.0, 0.765625),
+                negative: SplitStats::new(3.0, 2.0, 3.0),
+                gain: 3.765625,
             })
         );
 
@@ -523,9 +523,9 @@ mod tests {
                 feature_id: 1,
                 bin_id: 0,
                 with_missing: true,
-                positive: SplitStats::new(-1.0, 1.0, 1.0),
-                negative: SplitStats::new(2.25, 4.0, 1.265625),
-                gain: 2.265625,
+                positive: SplitStats::new(-1.0, 1.0, 0.5),
+                negative: SplitStats::new(2.25, 4.0, 1.0125),
+                gain: 1.5125,
             })
         );
     }
@@ -534,7 +534,7 @@ mod tests {
     fn onehot_simple() {
         let features = vec![Feature::onehot("", None); 3];
         let mut splittable = build_splittable();
-        splittable.histogram.data_mut()[4].0 = -2.0;
+        splittable.histogram.data_mut()[4].0 = -1.0;
         splittable.histogram.data_mut()[7].0 = -2.0;
         assert_eq!(
             test_find_split(&splittable, Some(&features), &BoostNodeOptions::default()),
@@ -542,9 +542,9 @@ mod tests {
                 feature_id: 1,
                 bin_id: 3,
                 with_missing: true,
-                positive: SplitStats::new(-4.0, 2.0, 8.0),
-                negative: SplitStats::new(5.25, 3.0, 9.1875),
-                gain: 17.1875,
+                positive: SplitStats::new(-3.0, 2.0, 3.0),
+                negative: SplitStats::new(4.25, 3.0, 4.515625),
+                gain: 7.515625,
             })
         );
     }
@@ -559,9 +559,9 @@ mod tests {
                 feature_id: 1,
                 bin_id: 1,
                 with_missing: false,
-                positive: SplitStats::new(0.25, 1.0, 0.0625),
-                negative: SplitStats::new(1.0, 4.0, 0.25),
-                gain: 0.3125,
+                positive: SplitStats::new(0.25, 1.0, 0.03125),
+                negative: SplitStats::new(1.0, 4.0, 0.2),
+                gain: 0.23125,
             })
         );
     }
@@ -577,9 +577,9 @@ mod tests {
                 feature_id: 2,
                 bin_id: 1,
                 with_missing: false,
-                positive: SplitStats::new(0.25, 1.0, 0.0625),
-                negative: SplitStats::new(1.0, 4.0, 0.25),
-                gain: 0.3125,
+                positive: SplitStats::new(0.25, 1.0, 0.03125),
+                negative: SplitStats::new(1.0, 4.0, 0.2),
+                gain: 0.23125,
             })
         );
 

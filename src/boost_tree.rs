@@ -48,7 +48,7 @@ impl Default for BoostTreeOptions {
             colsample_bytree: 1.0,
             colsample_bylevel: 1.0,
             colsample_bynode: 1.0,
-            max_depth: 5,
+            max_depth: 6,
             max_leaves: 0,
             loss_guide: false,
         }
@@ -585,17 +585,17 @@ mod tests {
         assert_eq!(
             tree.to_string(None),
             concat!(
-                "0:[14 <= 5] yes=1,no=2,gain=1.8308164,cover=1000\n",
-                "    1:value=-0.011305538,cover=575\n",
-                "    2:[5 <= 2] yes=3,no=4,gain=1.399197,cover=425\n",
-                "        3:value=-0.015970366,cover=102\n",
-                "        4:[13 <= 7] yes=5,no=6,gain=1.6376567,cover=323\n",
-                "            5:[5 <= 6] yes=7,no=8,gain=2.3093631,cover=261\n",
-                "                7:[15 <= 3 | null] yes=9,no=10,gain=2.380442,cover=140\n",
-                "                    9:value=0.110347375,cover=54\n",
-                "                    10:value=0.029982187,cover=86\n",
-                "                8:value=0.0043913317,cover=121\n",
-                "            6:value=-0.019494265,cover=62",
+                "0:[14 <= 5] yes=1,no=2,gain=1.8270168,cover=1000\n",
+                "    1:value=-0.01128591,cover=575\n",
+                "    2:[5 <= 2] yes=3,no=4,gain=1.3922141,cover=425\n",
+                "        3:value=-0.015815314,cover=102\n",
+                "        4:[13 <= 7] yes=5,no=6,gain=1.6266977,cover=323\n",
+                "            5:[5 <= 6] yes=7,no=8,gain=2.2814887,cover=261\n",
+                "                7:[15 <= 3 | null] yes=9,no=10,gain=2.2787583,cover=140\n",
+                "                    9:value=0.10834106,cover=54\n",
+                "                    10:value=0.029637564,cover=86\n",
+                "                8:value=0.0043553375,cover=121\n",
+                "            6:value=-0.019184832,cover=62",
             )
         );
     }

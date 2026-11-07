@@ -27,8 +27,8 @@ def test_regression():
     gb.fit(x, y)
     pred = gb.predict(x)
 
-    assert np.allclose(pred[:3], [-0.94069624, 1.352104, -0.857982])
-    assert np.allclose(gb.loss(), 0.042405)
+    assert np.allclose(pred[:3], [-0.82953626, 1.4252262, -1.0186437])
+    assert np.isclose(gb.loss(), 0.02905933)
 
 
 def test_classification():
@@ -40,8 +40,8 @@ def test_classification():
     gb.fit(x, y)
     pred = gb.predict(x)
 
-    assert np.allclose(pred[:3], [2.947796, 1.9830728, 2.0805707])
-    assert np.allclose(gb.loss(), 0.18994)
+    assert np.allclose(pred[:3], [1.8529657, 1.6342188, 2.718839])
+    assert np.isclose(gb.loss(), 0.24753502)
 
 
 def test_fit_next():

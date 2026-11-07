@@ -544,7 +544,7 @@ mod tests {
         );
         assert_eq!(
             model.predict[..4],
-            [0.24033013, 0.24033013, 0.20896423, 0.24271369]
+            [0.2486026, 0.29457557, 0.21656981, 0.21656981]
         );
     }
 
@@ -643,8 +643,8 @@ mod tests {
                 .iter()
                 .fold(0_u64, |acc, part| acc ^ u64::from_le_bytes(*part))
         };
-        assert_eq!(checksum(1), 387_416_199_230_371_108);
-        assert_eq!(checksum(2), 12_201_151_743_841_195);
+        assert_eq!(checksum(1), 204_539_111_593_914_962);
+        assert_eq!(checksum(2), 258_477_101_887_440_410);
     }
 
     #[test]
@@ -691,7 +691,7 @@ mod tests {
                 assert!((y1 - y2).abs() < 1e-6, "{i}: {y1} != {y2}");
             }
             let mean = |a: Vec<f32>| a.iter().sum::<f32>() / a.len() as f32;
-            assert_eq!(mean(model.loss()), 0.034740813);
+            assert_eq!(mean(model.loss()), 0.03501636);
         }
     }
 

@@ -303,8 +303,8 @@ mod tests {
             .map(|(y, y_pred)| (y - y_pred).abs())
             .collect::<Vec<_>>();
         let mean = |a: Vec<f32>| a.iter().sum::<f32>() / a.len() as f32;
-        assert_eq!(mean(errs), 0.10590586);
-        assert_eq!(mean(booster.loss()), 0.008633999);
+        assert_eq!(mean(errs), 0.113418594);
+        assert_eq!(mean(booster.loss()), 0.010162041);
     }
 
     #[test]

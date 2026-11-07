@@ -47,11 +47,11 @@ impl GradientBooster {
         colsample_bytree = 1.0,
         colsample_bylevel = 1.0,
         colsample_bynode = 1.0,
-        max_depth = 5,
+        max_depth = 6,
         max_leaves = 0,
         grow_policy = "depthwise",
         reg_alpha = 0.0,
-        reg_lambda = 0.0,
+        reg_lambda = 1.0,
         min_split_gain = 0.0,
         min_child_weight = 1.0,
         allow_missing_splits = false,
@@ -230,8 +230,8 @@ impl GradientBooster {
                     new_booster(options, &inputs, &target)
                 } else {
                     let new_feature = |i: usize| match onehot.contains(&i) {
-                        true => Feature::onehot(None, vec![]),
-                        false => Feature::linear(None, vec![]),
+                        true => Feature::onehot("", None),
+                        false => Feature::linear("", None),
                     };
                     let features = (0..inputs.len()).map(new_feature).collect();
                     new_with_features(options, &inputs, &target, features)
