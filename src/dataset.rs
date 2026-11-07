@@ -26,7 +26,7 @@ pub enum FeatureKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Feature {
     /// Original column name from the source data.
-    name: Option<String>,
+    name: String,
     /// Kind defines how values are matched.
     kind: FeatureKind,
     /// The bin boundaries split the original domain into `bins.len()` ranges.
@@ -37,23 +37,23 @@ pub struct Feature {
 
 impl Feature {
     /// Build a new feature.
-    pub fn new(name: Option<String>, kind: FeatureKind, bins: Vec<f32>) -> Self {
+    pub fn new(name: String, kind: FeatureKind, bins: Vec<f32>) -> Self {
         Self { name, kind, bins }
     }
 
     /// Build a feature with `FeatureKind::OneHot`.
-    pub fn onehot(name: Option<String>, bins: Vec<f32>) -> Self {
-        Self::new(name, FeatureKind::OneHot, bins)
+    pub fn onehot(name: &str, bins: Option<Vec<f32>>) -> Self {
+        Self::new(name.into(), FeatureKind::OneHot, bins.unwrap_or_default())
     }
 
     /// Build a feature with `FeatureKind::Linear`.
-    pub fn linear(name: Option<String>, bins: Vec<f32>) -> Self {
-        Self::new(name, FeatureKind::Linear, bins)
+    pub fn linear(name: &str, bins: Option<Vec<f32>>) -> Self {
+        Self::new(name.into(), FeatureKind::Linear, bins.unwrap_or_default())
     }
 
     /// Get feature name.
     pub fn name(&self) -> &str {
-        self.name.as_ref().map_or("", |x| x.as_str())
+        self.name.as_str()
     }
 
     /// Get feature kind.
@@ -64,13 +64,6 @@ impl Feature {
     /// Get bin boundaries.
     pub fn bins(&self) -> &[f32] {
         &self.bins
-    }
-}
-
-/// A linear feature with no name and no bins (used in tests).
-impl Default for Feature {
-    fn default() -> Self {
-        Self::linear(None, Vec::new())
     }
 }
 
@@ -301,7 +294,7 @@ fn sigmoid(y: f32) -> f32 {
 pub(crate) fn create_test_dataset(columns: usize, rows: usize, bins: usize) -> Dataset<u16> {
     let bins = Vec::from_iter((0..bins).map(|i| i as f32));
     Dataset::<u16>::new(
-        vec![Feature::linear(None, bins); columns],
+        vec![Feature::linear("", Some(bins)); columns],
         vec![vec![0; rows]; columns],
         vec![0.0; rows],
     )
@@ -314,12 +307,12 @@ mod tests {
 
     #[test]
     fn create_feature() {
-        let feature = Feature::linear(Some("name".into()), vec![1., 2.]);
+        let feature = Feature::linear("name", Some(vec![1., 2.]));
         assert_eq!(feature.name(), "name");
         assert_eq!(feature.kind(), FeatureKind::Linear);
         assert_eq!(feature.bins(), &[1., 2.]);
 
-        let feature = Feature::onehot(Some("other".into()), vec![]);
+        let feature = Feature::onehot("other", None);
         assert_eq!(feature.name(), "other");
         assert_eq!(feature.kind(), FeatureKind::OneHot);
         assert_eq!(feature.bins(), &[] as &[f32]);
@@ -327,7 +320,7 @@ mod tests {
 
     #[test]
     fn create_dataset() {
-        let features = vec![Feature::linear(None, vec![]), Feature::onehot(None, vec![])];
+        let features = vec![Feature::linear("", None), Feature::onehot("", None)];
         let empty = Dataset::<u8>::empty(features.clone()).unwrap();
         assert_eq!(empty.columns(), 2);
         assert_eq!(empty.rows(), 0);
@@ -356,7 +349,7 @@ mod tests {
 
     #[test]
     fn invalid_dataset() {
-        let features = vec![Feature::default(); 2];
+        let features = vec![Feature::linear("", None); 2];
         let input = vec![vec![0; 3]; 2];
         let create = |f, x, y| Dataset::<u8>::new(f, x, y);
 
@@ -366,7 +359,7 @@ mod tests {
             "features are not set"
         );
 
-        let bad_columns = create(vec![Feature::default()], input.clone(), vec![]);
+        let bad_columns = create(features[..1].to_vec(), input.clone(), vec![]);
         assert_eq!(
             bad_columns.unwrap_err().to_string(),
             "input columns do not match features"
@@ -387,7 +380,7 @@ mod tests {
 
     #[test]
     fn resize_dataset() {
-        let features = vec![Feature::default(); 2];
+        let features = vec![Feature::linear("", None); 2];
         let mut data = Dataset::empty(features).unwrap();
         data.resize(4, 0, Some(0.0));
         assert_eq!(data.rows(), 4);

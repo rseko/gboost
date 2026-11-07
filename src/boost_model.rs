@@ -277,7 +277,7 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
             // named by their column position.
             let mut features = features.unwrap_or_else(|| {
                 (0..inputs.len())
-                    .map(|i| Feature::linear(Some(i.to_string()), vec![]))
+                    .map(|i| Feature::linear(&i.to_string(), None))
                     .collect()
             });
 
@@ -285,12 +285,11 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
             // kind, but store the fitted boundaries (as f32).
             let all_bins = bin_all(inputs, options.boost_options.max_bins as usize, parallel);
             for (feat, bins) in features.iter_mut().zip(all_bins.iter()) {
-                let name = (!feat.name().is_empty()).then(|| feat.name().to_string());
                 let bins = bins
                     .iter()
                     .map(|x| x.to_f32().unwrap_or(f32::NAN))
                     .collect();
-                *feat = Feature::new(name, feat.kind(), bins);
+                *feat = Feature::new(feat.name().into(), feat.kind(), bins);
             }
 
             // Start the model file with the feature header block so later
@@ -467,7 +466,7 @@ impl ModelInit {
             .iter()
             .map(|x| x.to_f32().unwrap_or(f32::NAN))
             .collect::<Vec<_>>();
-        let feature = Feature::new(Some(name.into()), kind, bins);
+        let feature = Feature::new(name.into(), kind, bins);
         self.model_file
             .write_all(format_feature(&feature).as_bytes())?;
 

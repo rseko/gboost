@@ -16,7 +16,7 @@ const NUM_COLS: usize = 128;
 const NUM_BINS: usize = 255;
 
 fn create_dataset(rng: &mut StdRng) -> Dataset<u8> {
-    let feature = Feature::linear(None, vec![0.0; NUM_BINS]);
+    let feature = Feature::linear("", Some(vec![0.0; NUM_BINS]));
     let mut new_row = || {
         let mut row = vec![0; NUM_ROWS];
         rng.fill_bytes(&mut row);

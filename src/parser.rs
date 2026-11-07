@@ -43,7 +43,7 @@ fn parse_feature(text: &str) -> Result<Feature> {
         bail!("invalid feature");
     }
 
-    let name = Some(parts[0].to_string());
+    let name = parts[0].to_string();
     let kind = match parts[1] {
         "linear" => FeatureKind::Linear,
         "onehot" => FeatureKind::OneHot,
@@ -55,10 +55,7 @@ fn parse_feature(text: &str) -> Result<Feature> {
         .map(|s| s.trim().parse::<f32>().map_err(|e| anyhow!(e)))
         .collect::<Result<_>>()?;
 
-    Ok(match kind {
-        FeatureKind::Linear => Feature::linear(name, bins),
-        FeatureKind::OneHot => Feature::onehot(name, bins),
-    })
+    Ok(Feature::new(name, kind, bins))
 }
 
 /// Parse every blank-line-separated tree in the trees block.
@@ -250,8 +247,8 @@ mod tests {
         assert_eq!(
             features,
             vec![
-                Feature::onehot(Some("name".into()), vec![1.0, 2.0, 3.0]),
-                Feature::linear(Some("age".into()), vec![10.0, 20.0, 30.0]),
+                Feature::onehot("name", Some(vec![1.0, 2.0, 3.0])),
+                Feature::linear("age", Some(vec![10.0, 20.0, 30.0])),
             ]
         );
         assert_eq!(trees.len(), 2);

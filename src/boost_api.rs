@@ -252,7 +252,7 @@ mod tests {
         let inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();
 
         let features = (0..NUM_COLS)
-            .map(|i| Feature::linear(Some(format!("f{i}")), vec![]))
+            .map(|i| Feature::linear(&format!("f{i}"), None))
             .collect();
         let mut booster =
             new_with_features::<f32>(Options::default(), &inputs, &target, features).unwrap();

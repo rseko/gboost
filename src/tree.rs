@@ -356,7 +356,7 @@ mod tests {
     #[test]
     fn tree_format_with_context() {
         let tree = create_test_tree(/*depth*/ 2);
-        let feature = Feature::linear(Some("name".into()), vec![3.0, 4.0]);
+        let feature = Feature::linear("name", Some(vec![3.0, 4.0]));
         assert_eq!(
             tree.to_string(Some(&[feature])),
             concat!(
@@ -366,7 +366,7 @@ mod tests {
             )
         );
 
-        let feature = Feature::onehot(None, vec![]);
+        let feature = Feature::onehot("", None);
         let invalid = tree.to_string(Some(&[feature]));
         assert!(invalid.starts_with("0:[ ?? NaN]"));
     }

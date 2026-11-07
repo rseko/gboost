@@ -452,10 +452,7 @@ mod tests {
         };
 
         Dataset::new(
-            vec![
-                Feature::linear(Some("1".into()), vec![]),
-                Feature::linear(Some("2".into()), vec![]),
-            ],
+            vec![Feature::linear("1", None), Feature::linear("2", None)],
             vec![random_row(), random_row()],
             vec![1.0; NUM_ROWS],
         )
