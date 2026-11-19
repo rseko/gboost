@@ -490,7 +490,7 @@ impl ModelInit {
 }
 
 /// Render one feature header line of the model file: `name kind [b0, ...]`.
-fn format_feature(feat: &Feature) -> String {
+pub fn format_feature(feat: &Feature) -> String {
     format!(
         "{} {} [{}]\n",
         feat.name().replace(' ', "_"),

@@ -134,17 +134,18 @@ fn find_split(
     // each linear bin past the first. A bin with zero hessian is skipped -
     // with the objectives in `dataset`, zero hessian implies zero gradient,
     // so it contributes nothing to any split.
-    let (mut left, mut right) = ((0.0, 0.0), total);
+    let (mut left, mut right, mut front) = ((0.0, 0.0), total, true);
     for (bin_id, (grad, hess)) in histogram.iter().enumerate().take(end).skip(start) {
         if *hess == 0.0 {
             continue;
         }
-        (left, right) = if is_linear && bin_id > 1 {
+        (left, right) = if is_linear && !front {
             (
                 (left.0 + grad, left.1 + hess),
                 (right.0 - grad, right.1 - hess),
             )
         } else {
+            front = is_linear && bin_id == 0;
             ((*grad, *hess), (total.0 - grad, total.1 - hess))
         };
         // The side the positive rows land on must carry enough weight; the

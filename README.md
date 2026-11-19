@@ -46,7 +46,7 @@ columnar API, a couple of gboost-specific options, and the out-of-core path.
 gboost = "0.1"
 ```
 
-MIT-licensed. Edition 2024 requires Rust 1.85+.
+MIT-licensed. Edition 2024; requires Rust 1.94+.
 
 ### Crate features
 

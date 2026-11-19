@@ -148,19 +148,18 @@ where
                     let mut rng = StdRng::seed_from_u64(seed);
                     let offset = idx * config.bits_per_batch;
 
-                    let (mask, read_size) = if offset < last_batch {
+                    let (mask, size) = if offset < last_batch {
                         let mut mask_gen = BitmaskGenerator::new(BATCH);
                         (mask_gen.next(&mut rng, config.bits_per_batch), BATCH)
                     } else {
-                        buffers.predict.truncate(tail);
                         (BitmaskGenerator::new(tail).next(&mut rng, rest), tail)
                     };
 
                     if let Some(files) = files {
                         files.seek::<T>(idx * BATCH)?;
-                        files.read(buffers, read_size, config.initial)?;
-                        process_batch(buffers, &mut inputs, index, tree, &mask, offset);
-                        files.write(&buffers.predict)?;
+                        files.read(buffers, size, config.initial)?;
+                        process_batch(buffers, &mut inputs, index, tree, &mask, offset, size);
+                        files.write(&buffers.predict[..size])?;
                     } else if let Some(error) = error.take() {
                         return Err(error);
                     }
@@ -183,10 +182,9 @@ where
             // Pick the sampled row mask and the byte width to read; on the
             // final (partial) batch also shrink the prediction buffer so the
             // tree-walk / gradient pass touches only the real rows.
-            let (mask, read_size) = if offset < last_batch {
+            let (mask, size) = if offset < last_batch {
                 (mask_gen.next(rng, config.bits_per_batch), BATCH)
             } else {
-                buffers.predict.truncate(tail);
                 (BitmaskGenerator::new(tail).next(rng, rest), tail)
             };
 
@@ -194,9 +192,9 @@ where
             // into `buffers`, fold in the candidate tree and recompute the
             // sampled rows' derivatives into `index`, then write the
             // updated predictions out at this batch's slot in `boost.<step>`.
-            files.read(&mut buffers, read_size, config.initial)?;
-            process_batch(&mut buffers, &mut inputs, index, tree, &mask, offset);
-            files.write(&buffers.predict)?;
+            files.read(&mut buffers, size, config.initial)?;
+            process_batch(&mut buffers, &mut inputs, index, tree, &mask, offset, size);
+            files.write(&buffers.predict[..size])?;
         }
     }
 
@@ -220,12 +218,13 @@ fn process_batch<T: Copy + Into<usize>, I: IndexT, O: Objective>(
     tree: Option<&Tree>,
     mask: &[u64],
     offset: usize,
+    size: usize,
 ) {
     // Add the candidate tree's leaf contribution to each row's running
     // prediction. `get_bin` maps a row and column to its bin id so the tree
     // can be traversed row by row.
     if let Some(tree) = tree {
-        for (idx, y_pred) in buffers.predict.iter_mut().enumerate() {
+        for (idx, y_pred) in buffers.predict.iter_mut().take(size).enumerate() {
             let get_bin = |col: usize| buffers.input[col * BATCH + idx].into();
             *y_pred += tree.find_leaf(get_bin).get_value();
         }

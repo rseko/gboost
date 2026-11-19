@@ -269,13 +269,13 @@ pub struct LogLoss(f32, f32);
 impl Objective for LogLoss {
     /// Loss: -(y * log(y^) + (1 - y) * log(1 - y^))
     fn loss(y: f32, y_pred: f32) -> f32 {
-        let y_hat = sigmoid(y_pred);
+        let y_hat = sigmoid_normal(y_pred);
         -(y * y_hat.ln() + (1.0 - y) * (1.0 - y_hat).ln())
     }
 
     /// Gradient: y^ - y; Hessian: y^ * (1 - y^)
     fn derive(y: f32, y_pred: f32) -> Self {
-        let y_hat = sigmoid(y_pred);
+        let y_hat = sigmoid_normal(y_pred);
         Self(y_hat - y, y_hat * (1.0 - y_hat))
     }
 
@@ -284,9 +284,12 @@ impl Objective for LogLoss {
     }
 }
 
-/// The sigmoid of `y`: maps a raw score to a probability in (0, 1).
-fn sigmoid(y: f32) -> f32 {
-    1.0 / (1.0 + (-y).exp())
+/// The sigmoid of `y`: maps a raw score to a probability in (0, 1), clamped
+/// to `[eps, 1 - eps]` so `log` and the hessian stay finite (see `LogLoss`).
+fn sigmoid_normal(y: f32) -> f32 {
+    let res = 1.0 / (1.0 + (-y).exp());
+    let eps = f32::EPSILON;
+    res.clamp(eps, 1.0 - eps)
 }
 
 /// Build an empty dataset (used in tests).
