@@ -283,7 +283,12 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
 
             // Fit one quantizer per column and keep each feature's name and
             // kind, but store the fitted boundaries (as f32).
-            let all_bins = bin_all(inputs, options.boost_options.max_bins as usize, parallel);
+            let all_bins = bin_all(
+                inputs,
+                options.boost_options.max_bins as usize,
+                options.boost_options.bins_oversample as usize,
+                parallel,
+            );
             for (feat, bins) in features.iter_mut().zip(all_bins.iter()) {
                 let bins = bins
                     .iter()
@@ -416,19 +421,21 @@ impl<T: Copy, I, O> std::fmt::Debug for BoostModel<T, I, O> {
 pub struct ModelInit {
     path: PathBuf,
     model_file: File,
-    max_bins: usize,
+    max_bins: u16,
+    oversample: u16,
     features: Vec<Feature>,
 }
 
 impl ModelInit {
     /// Start staging a dataset under `path`, truncating any existing model
     /// file. `max_bins` caps the per-column bin count (`>= 1`).
-    pub fn new(path: PathBuf, max_bins: usize) -> Result<Self> {
+    pub fn new(path: PathBuf, max_bins: u16, oversample: Option<u16>) -> Result<Self> {
         let model_file = File::create(path.join(FILENAME_MODEL))?;
         Ok(Self {
             path,
             model_file,
             max_bins: max_bins.max(1),
+            oversample: oversample.unwrap_or_default(),
             features: vec![],
         })
     }
@@ -454,7 +461,7 @@ impl ModelInit {
         let mut feature_file = File::create(self.path.join(FILENAME_INPUT).with_extension(suffix))?;
 
         // Fit the quantizer and write the quantized column to disk.
-        let bins_quant = bins_from(data, self.max_bins);
+        let bins_quant = bins_from(data, self.max_bins as usize, self.oversample as usize);
         let data_quant = data
             .iter()
             .map(|x| quantize::<F, T>(x, &bins_quant))
@@ -536,15 +543,15 @@ mod tests {
 
         assert_eq!(
             model.data.features()[0].bins()[192..196],
-            [2.158268, 6.059814, 14.9356165, 28.31305]
+            [0.25006175, 1.0910213, 3.4569745, 7.4929986]
         );
         assert_eq!(
             model.data.inputs()[0][..8],
-            [46, 66, 113, 54, 45, 132, 83, 106]
+            [51, 71, 116, 59, 50, 135, 87, 110]
         );
         assert_eq!(
             model.predict[..4],
-            [0.2486026, 0.29457557, 0.21656981, 0.21656981]
+            [0.24853963, 0.26268902, 0.21682428, 0.21682428]
         );
     }
 
@@ -599,7 +606,7 @@ mod tests {
             .set_persist_path(Some(temp_dir.path().into()));
 
         // Create the model data on disk.
-        let mut model_init = ModelInit::new(temp_dir.path().into(), 255).unwrap();
+        let mut model_init = ModelInit::new(temp_dir.path().into(), 255, None).unwrap();
         for (idx, row) in data.iter().enumerate() {
             let kind = if idx % 2 == 0 {
                 FeatureKind::Linear
@@ -691,7 +698,7 @@ mod tests {
                 assert!((y1 - y2).abs() < 1e-6, "{i}: {y1} != {y2}");
             }
             let mean = |a: Vec<f32>| a.iter().sum::<f32>() / a.len() as f32;
-            assert_eq!(mean(model.loss()), 0.03501636);
+            assert_eq!(mean(model.loss()), 0.034829535);
         }
     }
 

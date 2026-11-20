@@ -7,7 +7,7 @@ from gboostrs import GradientBooster
 
 def test_options():
     gb = GradientBooster()
-    assert len(gb.get_params()) == 21
+    assert len(gb.get_params()) == 22
 
     copy = GradientBooster(**gb.get_params())
     assert copy.get_params() == gb.get_params()

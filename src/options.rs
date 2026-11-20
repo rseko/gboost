@@ -37,6 +37,8 @@ pub struct BoosterOptions {
     pub base_score: f32,
     /// Maximum number of bins for quantization.
     pub max_bins: u16,
+    /// Multiplier on `max_bins` for quantile thresholds sampled before merging.
+    pub bins_oversample: u16,
     /// Where to persist large-dataset artifacts, if offloading is used.
     pub persist_path: Option<PathBuf>,
     /// Whether the parallel execution paths are enabled.
@@ -51,6 +53,7 @@ impl Default for BoosterOptions {
             objective: ObjectiveKind::SquaredLoss,
             base_score: 0.0,
             max_bins: 255,
+            bins_oversample: 100,
             persist_path: None,
             parallel: true,
             seed: 0,
@@ -105,6 +108,12 @@ impl Options {
     /// Set the maximum number of bins for quantization.
     pub fn set_max_bins(mut self, max_bins: u16) -> Self {
         self.boost_options.max_bins = max_bins;
+        self
+    }
+
+    /// Set the oversample multiplier for bin fitting (sort-based path only).
+    pub fn set_bins_oversample(mut self, bins_oversample: u16) -> Self {
+        self.boost_options.bins_oversample = bins_oversample;
         self
     }
 
@@ -261,6 +270,7 @@ mod tests {
             objective: ObjectiveKind::LogLoss,
             base_score: 1.0,
             max_bins: 65535,
+            bins_oversample: 10,
             persist_path: Some(path.clone()),
             parallel: false,
             seed: 42,
@@ -287,6 +297,7 @@ mod tests {
             .set_objective(ObjectiveKind::LogLoss)
             .set_base_score(1.0)
             .set_max_bins(65535)
+            .set_bins_oversample(10)
             .set_persist_path(Some(path.clone()))
             .set_parallel(false)
             .set_seed(42)
@@ -330,8 +341,9 @@ mod tests {
         assert_eq!(
             json,
             concat!(
-                r#"{"objective":"SquaredLoss","base_score":0.0,"max_bins":255,"parallel":true"#,
-                r#","seed":0,"learning_rate":0.5,"allow_missing_splits":true}"#
+                r#"{"objective":"SquaredLoss","base_score":0.0,"max_bins":255"#,
+                r#","bins_oversample":100,"parallel":true,"seed":0"#,
+                r#","learning_rate":0.5,"allow_missing_splits":true}"#
             )
         );
 

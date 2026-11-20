@@ -39,6 +39,7 @@ impl GradientBooster {
         objective = "squaredloss",
         base_score = 0.0,
         max_bins = 255,
+        bins_oversample = 100,
         persist_path = None,
         parallel = true,
         seed = 0,
@@ -64,6 +65,7 @@ impl GradientBooster {
         objective: &str,
         base_score: f32,
         max_bins: u16,
+        bins_oversample: u16,
         persist_path: Option<&str>,
         parallel: bool,
         seed: u64,
@@ -109,6 +111,7 @@ impl GradientBooster {
             .set_objective(objective)
             .set_base_score(base_score)
             .set_max_bins(max_bins)
+            .set_bins_oversample(bins_oversample)
             .set_persist_path(persist_path.map(PathBuf::from))
             .set_parallel(parallel)
             .set_seed(seed)
@@ -167,6 +170,7 @@ impl GradientBooster {
         )?;
         dict.set_item("base_score", o.boost_options.base_score)?;
         dict.set_item("max_bins", o.boost_options.max_bins)?;
+        dict.set_item("bins_oversample", o.boost_options.bins_oversample)?;
         dict.set_item(
             "persist_path",
             o.boost_options

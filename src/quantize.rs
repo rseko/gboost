@@ -8,7 +8,7 @@
 //! - `bins_from` is the fitting entry point; NaNs are always dropped,
 //!   and an empty result is normalized to a single positive infinity.
 //!   - `fit_small` uses an exact float16 histogram (total ordering) and
-//!     quantile-walks the histogram to choose the bins.
+//!     merges the distinct values into `max_bins` contiguous groups.
 //!   - `fit_large` sorts the values and either keeps the distinct values
 //!     or samples them evenly by rank.
 //! - `bin_all` fits every column's bin boundaries.
@@ -16,6 +16,7 @@
 
 use num_traits::{Float, PrimInt};
 use rayon::prelude::*;
+use std::collections::BinaryHeap;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 /// Map a value to its 1-based bin index among the sorted `bins`.
@@ -55,8 +56,13 @@ impl<T: Float + FromBytes + Immutable + IntoBytes + Send + Sync> QuantFloat for 
 
 /// Fit a quantizer per column. Returns the fitted boundaries, one `Vec<F>`
 /// per column in column order.
-pub fn bin_all<F: QuantFloat>(data: &[&[F]], max_bins: usize, parallel: bool) -> Vec<Vec<F>> {
-    let bin = |data: &&[F]| bins_from(data, max_bins);
+pub fn bin_all<F: QuantFloat>(
+    data: &[&[F]],
+    max_bins: usize,
+    oversample: usize,
+    parallel: bool,
+) -> Vec<Vec<F>> {
+    let bin = |data: &&[F]| bins_from(data, max_bins, oversample);
     if parallel {
         data.par_iter().map(bin).collect()
     } else {
@@ -66,19 +72,18 @@ pub fn bin_all<F: QuantFloat>(data: &[&[F]], max_bins: usize, parallel: bool) ->
 
 /// Fit up to `max_bins` boundaries from `data`.
 ///
-/// NaNs are never treated as values. Dispatches to the histogram
-/// algorithm for float16 on large batches, otherwise to the sort-based
-/// one. The returned `bins` is always non-empty.
-pub fn bins_from<F: QuantFloat>(data: &[F], max_bins: usize) -> Vec<F> {
+/// NaNs are never treated as values. Dispatches to the exact histogram
+/// algorithm for float16, otherwise to the sort-based one. `oversample`
+/// only affects the sort-based path. The returned `bins` is always
+/// non-empty.
+pub fn bins_from<F: QuantFloat>(data: &[F], max_bins: usize, oversample: usize) -> Vec<F> {
     assert!(max_bins > 0);
 
     let n_bytes = std::mem::size_of::<F>();
-    // The small path allocates a 64k histogram; below this many values
-    // sorting is cheaper, hence the size gate alongside the type gate.
-    let mut bins = if n_bytes == 2 && data.len() >= 4096 {
+    let mut bins = if n_bytes == 2 && data.len() > max_bins {
         fit_small::<_, u16>(data, max_bins)
     } else {
-        fit_large(data, max_bins)
+        fit_large(data, max_bins, oversample.max(1))
     };
 
     // A column with no usable values still needs one bin to split on.
@@ -92,34 +97,31 @@ pub fn bins_from<F: QuantFloat>(data: &[F], max_bins: usize) -> Vec<F> {
 ///
 /// Exact: each distinct value occupies one histogram slot, ordered by
 /// `to_bits`. If the distinct count is within `max_bins` every distinct
-/// value is kept; otherwise quantile thresholds are walked in slot
-/// order and one boundary per threshold is emitted.
-///
-/// When several thresholds land in the same histogram slot (heavily
-/// skewed input) the repeated boundary is dropped, so `bins` may end
-/// up shorter than `max_bins`.
+/// value is kept; otherwise the non-zero slot counts are merged into
+/// `max_bins` contiguous groups and the last value of each group is
+/// emitted as a boundary.
 fn fit_small<F, I>(data: &[F], max_bins: usize) -> Vec<F>
 where
     F: QuantFloat,
     I: PrimInt + FromBytes + Immutable + IntoBytes,
 {
-    // Monotone rank of -infinity: all values >= -inf sit above it, and
-    // negative NaN values below it (same number as positive NaN values),
-    // so the usable range is exactly the histogram width below.
+    // The histogram has one slot per non-NaN bit pattern. `to_bits` is a
+    // bijection from the non-NaN patterns onto a contiguous rank range, and
+    // -infinity sits at its low end: its rank is `nan_size`, and there are
+    // exactly `nan_size` NaN patterns on each side of the usable range (the
+    // sign bit doubles them). Subtracting both halves leaves the width of
+    // the usable range, so `bin = rank - nan_size` lands in `[0, hist_size)`.
     let nan_size = to_bits::<F, I>(F::neg_infinity()).to_usize().unwrap();
     let hist_size = (1 << (std::mem::size_of::<I>() * 8)) - nan_size * 2;
 
-    // Calculate the histogram and count NaN values.
+    // Calculate the histogram for non-NaN values.
     let mut hist = vec![0_usize; hist_size];
     let mut unique = 0;
-    let mut nan_count = 0;
     for value in data {
         if !value.is_nan() {
             let bin = to_bits::<F, I>(*value).to_usize().unwrap() - nan_size;
             unique += (hist[bin] == 0) as usize;
             hist[bin] += 1;
-        } else {
-            nan_count += 1;
         }
     }
 
@@ -130,28 +132,31 @@ where
         return hist
             .into_iter()
             .enumerate()
-            .filter_map(|(k, v)| if v != 0 { Some(convert(k)) } else { None })
+            .filter_map(|(k, v)| (v != 0).then(|| convert(k)))
             .collect::<Vec<_>>();
     }
 
-    // Quantile walk: the thresholds index the sorted (NaN-free) rows.
-    // `hist` is sorted by `to_bits`, so scanning slots accumulates the
-    // same counts in order.
+    // Reduce the per-distinct-value counts to `max_bins` contiguous groups,
+    // then emit the last value of each group as its boundary.
+    let mut sizes = hist
+        .iter()
+        .filter_map(|&v| (v != 0).then_some(v))
+        .collect::<Vec<_>>();
+    sizes = merge_adjacent(&sizes, max_bins);
+
+    // Walk the histogram in slot order. `rest` is how many non-zero slots
+    // remain in the current group; when it hits zero the group's last slot
+    // `k` is its boundary, so emit `convert(k)` and start the next group.
     let mut bins = Vec::with_capacity(max_bins);
-    let mut prev: Option<usize> = None;
-    let (mut idx, mut acc) = (0, 0);
-    for pos in ThresholdIter::new(max_bins, data.len() - nan_count) {
-        // Advance to the slot whose cumulative count first reaches the
-        // threshold; `acc` includes that slot once advanced.
-        while acc < pos {
-            acc += hist[idx];
-            idx += 1;
-        }
-        // `idx - 1` is the last slot at or below the threshold.
-        // Skip a slot already emitted for a previous threshold.
-        if prev.is_none_or(|x| x != idx) {
-            prev = Some(idx);
-            bins.push(convert(idx - 1));
+    let mut iter = sizes.into_iter();
+    let mut rest = iter.next().unwrap();
+    for (k, v) in hist.into_iter().enumerate() {
+        if v != 0 {
+            rest -= v;
+            if rest == 0 {
+                bins.push(convert(k));
+                rest = iter.next().unwrap_or(0);
+            }
         }
     }
     bins
@@ -160,13 +165,15 @@ where
 /// Sort-based fit for arbitrary-width floats.
 ///
 /// Values are sorted with NaNs parked at the front (then dropped). The
-/// first pass collects the distinct values in order; if that is within
-/// `max_bins` it is the answer. Otherwise values are sampled at the
-/// same quantile thresholds as `fit_small`, one boundary each.
+/// first pass collects up to `max_bins` distinct values in order; if the
+/// total distinct count is within `max_bins` that is the answer.
+/// Otherwise it picks `max_bins * oversample` quantile cut points
+/// (deduplicating repeats) and, if that still exceeds `max_bins`, merges
+/// the smallest adjacent groups via `merge_adjacent`.
 ///
 /// When several thresholds fall on the same value (heavily skewed input)
 /// the repeat is dropped, so `bins` may be shorter than `max_bins`.
-fn fit_large<F: QuantFloat>(data: &[F], max_bins: usize) -> Vec<F> {
+fn fit_large<F: QuantFloat>(data: &[F], max_bins: usize, oversample: usize) -> Vec<F> {
     // Total order with NaNs first, so `partition_point` can split them
     // off in a single sweep.
     let compare = |a: &F, b: &F| {
@@ -186,13 +193,13 @@ fn fit_large<F: QuantFloat>(data: &[F], max_bins: usize) -> Vec<F> {
         return vec![];
     }
 
-    // Pass 1: distinct values in sorted order (the first element plus
+    // First pass: distinct values in sorted order (the first element plus
     // each change point), capped at `max_bins`.
-    let mut bins = std::iter::once(slice[0])
+    let bins = std::iter::once(slice[0])
         .chain(
             slice
                 .array_windows()
-                .filter_map(|[a, b]| if a != b { Some(*b) } else { None })
+                .filter_map(|[a, b]| (a != b).then_some(*b))
                 .take(max_bins),
         )
         .collect::<Vec<_>>();
@@ -202,24 +209,137 @@ fn fit_large<F: QuantFloat>(data: &[F], max_bins: usize) -> Vec<F> {
         return bins;
     }
 
-    // Pass 2: more distinct values than `max_bins`, sample by rank at
-    // the quantile thresholds and drop consecutive repeats.
-    bins.clear();
-    let mut prev: Option<F> = None;
-    for pos in ThresholdIter::new(max_bins, slice.len()) {
-        let cur = slice[pos - 1];
-        if prev.is_none_or(|x| x != cur) {
-            prev = Some(cur);
-            bins.push(cur);
+    // Collect the `samples` quantile cut points as row indices (each `pos`
+    // is the 1-based end of a group), dropping consecutive thresholds that
+    // land on the same value. If that is already within `max_bins`, the cut
+    // points are the answer and we skip the merge entirely.
+    let mut cuts: Vec<usize> = vec![];
+    for pos in ThresholdIter::new(max_bins * oversample, slice.len()) {
+        if cuts.last().is_none_or(|p| slice[p - 1] != slice[pos - 1]) {
+            cuts.push(pos);
         }
     }
-    bins
+    if cuts.len() <= max_bins {
+        return cuts.into_iter().map(|p| slice[p - 1]).collect();
+    }
+
+    // Each cut must land on a value boundary: advance cut `idx` to the last
+    // row equal to the previous cut's value, so a group never straddles
+    // distinct values. Then close the final group at the end of the slice.
+    for idx in 1..cuts.len() {
+        let [l, r] = cuts.get_disjoint_mut([idx - 1, idx]).unwrap();
+        let value = slice[*l - 1];
+        *l += slice[*l..*r].partition_point(|&x| x == value);
+    }
+    *cuts.last_mut().unwrap() = slice.len();
+
+    // Convert boundaries to group sizes.
+    let sizes = cuts
+        .into_iter()
+        .scan(0, |prev, pos| Some(pos - std::mem::replace(prev, pos)))
+        .collect::<Vec<_>>();
+
+    // Merge the groups and get the bin values.
+    merge_adjacent(&sizes, max_bins)
+        .into_iter()
+        .scan(0, |pos, size| {
+            *pos += size;
+            Some(slice[*pos - 1])
+        })
+        .collect()
+}
+
+/// Greedily merge adjacent groups until exactly `target` remain, always
+/// merging the smallest-sum adjacent pair first (a min-heap keyed on the
+/// negative pair sum, so `BinaryHeap` pops it). Returns the size of each
+/// surviving group, in group order.
+///
+/// `groups` is an intrusive linked list: each live group's `left`/`right`
+/// point at its live neighbours, and a merged-away group is given
+/// `size == 0` and immediately dereferenced by both neighbours (so it is
+/// unreachable from the list). It then survives only as the index inside
+/// stale heap entries, which the loop validates against the live groups
+/// before applying.
+fn merge_adjacent(sizes: &[usize], target: usize) -> Vec<usize> {
+    let mut count = sizes.len() - 1;
+    let mut groups = sizes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| MergeGroup {
+            size: *n as isize,
+            left: (i != 0).then(|| i - 1),
+            right: (i != count).then(|| i + 1),
+        })
+        .collect::<Vec<_>>();
+
+    // One heap entry per adjacent pair, keyed on the (negative) pair sum so
+    // the smallest pair is popped first. `i` is the left group of the pair.
+    let mut heap = sizes
+        .array_windows()
+        .enumerate()
+        .map(|(i, [l, r])| (-((*l + *r) as isize), i))
+        .collect::<BinaryHeap<_>>();
+
+    while count >= target {
+        let (sum, idx) = heap.pop().unwrap();
+        // Entries are applied to the right pair (`idx`, `idx`.right); the
+        // stale check below rejects an entry whose pair no longer exists, so
+        // `right` is present here.
+        let adj = groups[idx].right.unwrap();
+        let [g1, g2] = groups.get_disjoint_mut([idx, adj]).unwrap();
+        // Stale: the recorded pair sum no longer matches the live groups, or
+        // this group was already merged away.
+        if g1.size + g2.size != -sum || g1.size == 0 {
+            continue;
+        }
+
+        // Update the groups being merged.
+        g1.size = -sum;
+        g2.size = 0;
+        g1.right = g2.right;
+
+        // Re-key the pairs now adjacent to the merged group `idx`. The
+        // neighbour sizes read here are the *new* merged size, matching what
+        // a later stale check will compare against.
+        let (left, right) = (g1.left, g2.right);
+        if let Some(prev) = left {
+            let g0 = &groups[prev];
+            heap.push((sum - g0.size, prev));
+        }
+        if let Some(next) = right {
+            let g3 = &mut groups[next];
+            g3.left = Some(idx);
+            heap.push((sum - g3.size, idx));
+        }
+        count -= 1;
+    }
+
+    // Walk the live groups (size > 0) via their `right` links and return each
+    // group's total size as a contiguous block of the original `sizes`.
+    let mut bounds = vec![];
+    let mut next = Some(0);
+    while let Some(idx) = next {
+        bounds.push(idx);
+        next = groups[idx].right;
+    }
+    bounds.push(sizes.len());
+
+    bounds
+        .array_windows()
+        .map(|[l, r]| sizes[*l..*r].iter().sum())
+        .collect()
+}
+
+struct MergeGroup {
+    size: isize,
+    left: Option<usize>,
+    right: Option<usize>,
 }
 
 /// Quantile threshold generator.
 ///
-/// Yields `max_bins` non-decreasing row counts in `[0..=total]`: the
-/// `k`-th one is `round(total * k / max_bins)` for `k = 1..=max_bins`.
+/// Yields `min(max_bins, total)` non-decreasing row counts in `[0..=total]`:
+/// the `k`-th one is `round(total * k / max_bins)` for `k = 1..=max_bins`.
 struct ThresholdIter {
     bin: usize,
     max_bins: usize,
@@ -228,10 +348,9 @@ struct ThresholdIter {
 
 impl ThresholdIter {
     fn new(max_bins: usize, total: usize) -> Self {
-        assert!(max_bins <= total);
         Self {
             bin: 0,
-            max_bins,
+            max_bins: max_bins.min(total),
             total,
         }
     }
@@ -245,8 +364,11 @@ impl Iterator for ThresholdIter {
             return None;
         }
         self.bin += 1;
-        let part = self.bin as f64 / self.max_bins as f64;
-        Some((self.total as f64 * part).round() as usize)
+        // Exact integer round of `total * bin / max_bins`: adding half the
+        // denominator before truncating is equivalent to rounding to nearest.
+        let num = 2 * self.bin * self.total + self.max_bins;
+        let den = 2 * self.max_bins;
+        Some(num / den)
     }
 }
 
@@ -317,7 +439,7 @@ mod tests {
         let data: Vec<&[f32]> = vec![&col1, &col2];
 
         for parallel in [false, true] {
-            let bins = bin_all(&data, 3, parallel);
+            let bins = bin_all(&data, 3, 1, parallel);
             let pairs = data
                 .iter()
                 .zip(bins.iter())
@@ -337,7 +459,7 @@ mod tests {
         assert_eq!(fit_small::<f16, u16>(&data_f16, 2), vec![]);
 
         let data_f32 = Vec::<f32>::new();
-        assert_eq!(fit_large(&data_f32, 2), Vec::<f32>::new());
+        assert_eq!(fit_large(&data_f32, 2, 1), Vec::<f32>::new());
     }
 
     #[test]
@@ -346,7 +468,7 @@ mod tests {
         assert_eq!(fit_small::<f16, u16>(&data_f16, 2), vec![]);
 
         let data_f32 = vec![f32::NAN; 10];
-        assert_eq!(fit_large(&data_f32, 2), Vec::<f32>::new());
+        assert_eq!(fit_large(&data_f32, 2, 1), Vec::<f32>::new());
     }
 
     #[test]
@@ -361,7 +483,7 @@ mod tests {
         assert_eq!(fit_small::<f16, u16>(&data_f16, 5), data_f16);
 
         let data_f32 = vec![f32::NEG_INFINITY, -1.0, 0.0, 1.0, f32::INFINITY];
-        assert_eq!(fit_large(&data_f32, 5), data_f32);
+        assert_eq!(fit_large(&data_f32, 5, 1), data_f32);
     }
 
     #[test]
@@ -373,7 +495,7 @@ mod tests {
         );
 
         let data_f32 = [vec![0.0; 10], vec![1.0, -1.0]].concat();
-        assert_eq!(fit_large(&data_f32, 4), vec![-1.0, 0.0, 1.0]);
+        assert_eq!(fit_large(&data_f32, 4, 1), vec![-1.0, 0.0, 1.0]);
     }
 
     #[test]
@@ -386,7 +508,7 @@ mod tests {
         );
 
         let data_f32 = (0..100).map(|i| (i % 10) as f32).collect::<Vec<_>>();
-        assert_eq!(fit_large(&data_f32, 5), vec![1.0, 3.0, 5.0, 7.0, 9.0]);
+        assert_eq!(fit_large(&data_f32, 5, 1), vec![1.0, 3.0, 5.0, 7.0, 9.0]);
     }
 
     #[test]
@@ -398,11 +520,12 @@ mod tests {
         .concat();
         assert_eq!(
             fit_small::<f16, u16>(&data_f16, 3),
-            vec![f16::ZERO, f16::MAX]
+            vec![f16::NEG_ONE, f16::ZERO, f16::MAX]
         );
 
         let data_f32 = [vec![0.0; 8], vec![1.0, -1.0, f32::MIN, f32::MAX]].concat();
-        assert_eq!(fit_large(&data_f32, 3), vec![0.0, f32::MAX]);
+        assert_eq!(fit_large(&data_f32, 3, 2), vec![-1.0, 0.0, f32::MAX]);
+        assert_eq!(fit_large(&data_f32, 3, 1), vec![0.0, f32::MAX]);
     }
 
     #[test]
@@ -414,28 +537,37 @@ mod tests {
         .concat();
         assert_eq!(
             fit_small::<f16, u16>(&data_f16, 2),
-            vec![f16::ZERO, f16::ONE]
+            vec![f16::NEG_ONE, f16::ONE]
         );
 
         let data_f32 = [vec![f32::NAN; 4], vec![1.0, -1.0, 0.0, -0.0]].concat();
-        assert_eq!(fit_large(&data_f32, 2), vec![0.0, 1.0]);
+        assert_eq!(fit_large(&data_f32, 2, 2), vec![-1.0, 1.0]);
     }
 
     #[test]
     fn fit_from_empty() {
         let data_f16 = Vec::<f16>::new();
-        assert_eq!(bins_from(&data_f16, 2), vec![f16::INFINITY]);
+        assert_eq!(bins_from(&data_f16, 2, 1), vec![f16::INFINITY]);
 
         let data_f32 = Vec::<f32>::new();
-        assert_eq!(bins_from(&data_f32, 2), vec![f32::INFINITY]);
+        assert_eq!(bins_from(&data_f32, 2, 1), vec![f32::INFINITY]);
     }
 
     #[test]
     fn fit_from_large() {
         let data_f16 = [f16::MIN, f16::ZERO, f16::ONE, f16::MAX].repeat(1024);
-        assert_eq!(bins_from(&data_f16, 3), vec![f16::ZERO, f16::ONE, f16::MAX]);
+        assert_eq!(
+            bins_from(&data_f16, 3, 1),
+            vec![f16::MIN, f16::ZERO, f16::MAX]
+        );
 
         let data_f32 = [f32::MIN, 0.0, 1.0, f32::MAX].repeat(1024);
-        assert_eq!(bins_from(&data_f32, 3), vec![0.0, 1.0, f32::MAX]);
+        assert_eq!(bins_from(&data_f32, 3, 2), vec![f32::MIN, 0.0, f32::MAX]);
+    }
+
+    #[test]
+    fn merge_heap() {
+        assert_eq!(merge_adjacent(&[1, 5, 3, 5, 100], 3), [6, 8, 100]);
+        assert_eq!(merge_adjacent(&[1, 5, 3, 5, 100], 2), [14, 100]);
     }
 }

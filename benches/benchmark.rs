@@ -122,10 +122,10 @@ fn bench_quant<T: QuantFloat>(c: &mut Criterion, prefix: &str) {
         .collect::<Vec<T>>();
 
     c.bench_function(&name("bins:1"), |b| {
-        b.iter(|| bins_from(&data, NUM_BINS));
+        b.iter(|| bins_from(&data, NUM_BINS, 1));
     });
 
-    let bins = bins_from(&data, NUM_BINS);
+    let bins = bins_from(&data, NUM_BINS, 1);
     c.bench_function(&name("quantize:1"), |b| {
         b.iter(|| quantize_all::<T, u8>(&[(&data, &bins)], false));
     });
