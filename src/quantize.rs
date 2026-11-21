@@ -16,7 +16,7 @@
 
 use num_traits::{Float, PrimInt};
 use rayon::prelude::*;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
 /// Map a value to its 1-based bin index among the sorted `bins`.
@@ -323,17 +323,87 @@ fn merge_adjacent(sizes: &[usize], target: usize) -> Vec<usize> {
         next = groups[idx].right;
     }
     bounds.push(sizes.len());
-
-    bounds
-        .array_windows()
-        .map(|[l, r]| sizes[*l..*r].iter().sum())
-        .collect()
+    refine_bounds(sizes, &mut bounds)
 }
 
 struct MergeGroup {
     size: isize,
     left: Option<usize>,
     right: Option<usize>,
+}
+
+/// Relax the internal boundaries of merged groups so each split is as
+/// balanced as possible.
+///
+/// `ranges` is the bound list: `0`, then the internal split indices, then
+/// `sizes.len()`. Each internal boundary lies between two neighbouring
+/// groups; it is moved toward the sum midpoint of its span, and a move
+/// changes the spans of the two adjacent boundaries, which are therefore
+/// relaxed in turn (work queue + `dirty` set), until a fixed point is
+/// reached. A boundary never moves on a tie: `b` is the first candidate
+/// and `min_by_key` keeps the first minimum, so the result is stable.
+///
+/// Returns each group's total size, in group order.
+fn refine_bounds(sizes: &[usize], ranges: &mut [usize]) -> Vec<usize> {
+    // Prefix sums: `sums[k]` is the total of `sizes[..k]`.
+    let sums = std::iter::once(0)
+        .chain(sizes.iter().scan(0, |acc, s| {
+            *acc += s;
+            Some(*acc)
+        }))
+        .collect::<Vec<_>>();
+
+    // Internal boundaries are the list indices `1..n`. `dirty` marks
+    // boundaries already pending in the queue so they are not enqueued
+    // twice.
+    let n = ranges.len() - 1;
+    let mut queue = VecDeque::from_iter(1..n);
+    let mut dirty = vec![true; n - 1];
+
+    while let Some(i) = queue.pop_front() {
+        dirty[i - 1] = false;
+
+        // Boundary `b` splits the span between neighbours `a` and `c`;
+        // relax it to the position that minimizes the left/right imbalance.
+        let (a, b, c) = (ranges[i - 1], ranges[i], ranges[i + 1]);
+        // Sum midpoint of the span (rounded up).
+        let target = sums[a] + (sums[c] - sums[a]).div_ceil(2);
+        // First boundary index reaching that midpoint. The result is
+        // slice-relative, so add `a` back; it lies in `a..=c - 1`, which is
+        // why the candidates are clamped below.
+        let j = a + sums[a + 1..c].partition_point(|&v| v < target);
+
+        // Left/right row-count imbalance around a candidate split.
+        let imbalance = |k: &usize| {
+            let (l, r) = (sums[*k] - sums[a], sums[c] - sums[*k]);
+            l.abs_diff(r)
+        };
+        // Candidates: the current boundary plus the split positions closest
+        // to the midpoint, clamped into the valid internal range
+        // `a + 1..c - 1`.
+        let best = [b, j.max(a + 1), (j + 1).min(c - 1)]
+            .into_iter()
+            .min_by_key(imbalance)
+            .unwrap();
+
+        if best != b {
+            ranges[i] = best;
+            // Moving this boundary shifts the spans of its neighbours, so
+            // relax them again.
+            for k in [i - 1, i + 1] {
+                if k > 0 && k < n && !dirty[k - 1] {
+                    queue.push_back(k);
+                    dirty[k - 1] = true;
+                }
+            }
+        }
+    }
+
+    // Map each window to its group's total size.
+    ranges
+        .array_windows()
+        .map(|[l, r]| sums[*r] - sums[*l])
+        .collect()
 }
 
 /// Quantile threshold generator.
@@ -569,5 +639,6 @@ mod tests {
     fn merge_heap() {
         assert_eq!(merge_adjacent(&[1, 5, 3, 5, 100], 3), [6, 8, 100]);
         assert_eq!(merge_adjacent(&[1, 5, 3, 5, 100], 2), [14, 100]);
+        assert_eq!(merge_adjacent(&[8, 1, 1, 8], 2), [9, 9]);
     }
 }

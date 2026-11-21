@@ -698,7 +698,7 @@ mod tests {
                 assert!((y1 - y2).abs() < 1e-6, "{i}: {y1} != {y2}");
             }
             let mean = |a: Vec<f32>| a.iter().sum::<f32>() / a.len() as f32;
-            assert_eq!(mean(model.loss()), 0.034829535);
+            assert_eq!(mean(model.loss()), 0.035231672);
         }
     }
 
