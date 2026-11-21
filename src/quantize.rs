@@ -132,7 +132,8 @@ where
         return hist
             .into_iter()
             .enumerate()
-            .filter_map(|(k, v)| (v != 0).then(|| convert(k)))
+            .filter(|(_, v)| *v != 0)
+            .map(|(k, _)| convert(k))
             .collect::<Vec<_>>();
     }
 

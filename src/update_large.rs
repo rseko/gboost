@@ -1,7 +1,8 @@
 //! One boosting iteration's data update for large, on-disk datasets: accumulate
 //! the new tree's leaf values into the running predictions, then recompute the
-//! per-row gradient/hessian pairs. The updated predictions are written back to
-//! the `boost.<step>` file on disk.
+//! per-row gradient/hessian pairs, and report the mean training loss over all
+//! rows. The updated predictions are written back to the `boost.<step>` file
+//! on disk.
 //!
 //! Functions:
 //! - `update_large`: optional tree update plus gradient/hessian update,
@@ -56,6 +57,9 @@ pub struct UpdateConfig {
 /// sample `bits_per_batch` rows to recompute the loss gradient and hessian.
 /// Those derivatives are written into `index` and the updated predictions
 /// into `boost.<step>`. A final partial batch (the tail) is handled separately.
+///
+/// Returns the mean training loss over the dataset's rows, evaluated at the
+/// (possibly tree-adjusted) predictions.
 pub fn update_large<T, I, O>(
     data: &mut Dataset<T>,
     index: &mut [RowIndex<I, O>],
@@ -64,7 +68,7 @@ pub fn update_large<T, I, O>(
     config: &UpdateConfig,
     rng: &mut StdRng,
     parallel: bool,
-) -> Result<()>
+) -> Result<f64>
 where
     T: Copy + Into<usize> + IntoBytes + FromBytes + Send + Sync,
     I: IndexT,
@@ -117,7 +121,7 @@ where
         file.set_len((config.total_rows * std::mem::size_of::<f32>()) as u64)?;
     }
 
-    if parallel {
+    let loss = if parallel {
         // One deterministic seed per batch, so each worker re-derives its own
         // `StdRng` locally. With a fresh shuffle buffer per batch, each batch's
         // sampled rows are reproducible without shared mutable state.
@@ -131,7 +135,7 @@ where
             .zip(index_slices.into_par_iter())
             .zip(seeds.into_par_iter())
             .enumerate()
-            .try_for_each_init(
+            .map_init(
                 || {
                     // Open the dataset's file handles per worker (the `error`
                     // arm defers a failed open until the batch's turn).
@@ -155,17 +159,20 @@ where
                         (BitmaskGenerator::new(tail).next(&mut rng, rest), tail)
                     };
 
+                    let mut loss = f64::NAN;
                     if let Some(files) = files {
                         files.seek::<T>(idx * BATCH)?;
                         files.read(buffers, size, config.initial)?;
-                        process_batch(buffers, &mut inputs, index, tree, &mask, offset, size);
+                        loss =
+                            process_batch(buffers, &mut inputs, index, tree, &mask, offset, size);
                         files.write(&buffers.predict[..size])?;
                     } else if let Some(error) = error.take() {
                         return Err(error);
                     }
-                    Ok(())
+                    Ok(loss)
                 },
-            )?;
+            )
+            .try_reduce(|| 0.0, |a, b| Ok(a + b))
     } else {
         // Sequential path: one shared file-handle set, one shared scratch
         // workspace, and one shared bitmask generator, all reused across
@@ -178,6 +185,7 @@ where
         // offset with the corresponding per-batch input/index slices.
         let counter = (0..rows).step_by(config.bits_per_batch);
         let iter = input_slices.into_iter().zip(index_slices);
+        let mut loss = 0.0;
         for (offset, (mut inputs, index)) in counter.zip(iter) {
             // Pick the sampled row mask and the byte width to read; on the
             // final (partial) batch also shrink the prediction buffer so the
@@ -193,10 +201,11 @@ where
             // sampled rows' derivatives into `index`, then write the
             // updated predictions out at this batch's slot in `boost.<step>`.
             files.read(&mut buffers, size, config.initial)?;
-            process_batch(&mut buffers, &mut inputs, index, tree, &mask, offset, size);
+            loss += process_batch(&mut buffers, &mut inputs, index, tree, &mask, offset, size);
             files.write(&buffers.predict[..size])?;
         }
-    }
+        Ok(loss)
+    }?;
 
     // Move the temporary file, if successful.
     if config.train_step > 0 {
@@ -205,12 +214,16 @@ where
             output_filename.with_extension(config.train_step.to_string()),
         )?;
     }
-    Ok(())
+    Ok(loss / (index.len() as f64))
 }
 
 /// Add the candidate tree's contribution to every row's prediction, then for
 /// the rows selected by `mask` compute their loss derivatives and record them
 /// in `row_index` at the global position `offset + idx`.
+///
+/// Returns the sum of the objective's loss over the sampled rows (evaluated
+/// at the tree-adjusted predictions), so callers can fold it into a
+/// whole-dataset total.
 fn process_batch<T: Copy + Into<usize>, I: IndexT, O: Objective>(
     buffers: &mut UpdateBuffers<T>,
     inputs: &mut [&mut [T]],
@@ -219,7 +232,7 @@ fn process_batch<T: Copy + Into<usize>, I: IndexT, O: Objective>(
     mask: &[u64],
     offset: usize,
     size: usize,
-) {
+) -> f64 {
     // Add the candidate tree's leaf contribution to each row's running
     // prediction. `get_bin` maps a row and column to its bin id so the tree
     // can be traversed row by row.
@@ -238,17 +251,20 @@ fn process_batch<T: Copy + Into<usize>, I: IndexT, O: Objective>(
             .filter(|j| *n & (1 << j) != 0)
             .map(move |j| i * 64 + j)
     });
-    iter.enumerate().for_each(|(idx, bit)| {
-        // Copy the sampled row's feature values from the batch buffer into the
-        // in-memory inputs column view.
-        for (src, dst) in buffers.input.chunks(BATCH).zip(inputs.iter_mut()) {
-            dst[idx] = src[bit];
-        }
-        // Recompute the loss derivatives for this row using its true target and
-        // the (possibly tree-adjusted) prediction, then store them.
-        let deriv = O::derive(buffers.target[bit], buffers.predict[bit]);
-        index[idx] = RowIndex::new(offset + idx, deriv);
-    });
+    iter.enumerate()
+        .map(|(idx, bit)| {
+            // Copy the sampled row's feature values from the batch buffer into the
+            // in-memory inputs column view.
+            for (src, dst) in buffers.input.chunks(BATCH).zip(inputs.iter_mut()) {
+                dst[idx] = src[bit];
+            }
+            // Recompute the loss derivatives for this row using its true target and
+            // the (possibly tree-adjusted) prediction, then store them.
+            let (y, y_pred) = (buffers.target[bit], buffers.predict[bit]);
+            index[idx] = RowIndex::new(offset + idx, O::derive(y, y_pred));
+            O::loss(y, y_pred) as f64
+        })
+        .sum()
 }
 
 /// Per-batch scratch workspace for one `BATCH`-row window of data. Reused
@@ -489,7 +505,7 @@ mod tests {
             initial: 0.5,
             bits_per_batch: NUM_SAMPLES,
         };
-        assert!(
+        assert_eq!(
             update_large(
                 &mut data,
                 &mut index,
@@ -499,7 +515,8 @@ mod tests {
                 &mut rng,
                 /*parallel*/ false
             )
-            .is_ok()
+            .unwrap() as f32,
+            0.0451491
         );
 
         // Verify the resulting dataset.
@@ -513,7 +530,7 @@ mod tests {
 
         // Run the second update.
         config.train_step += 1;
-        assert!(
+        assert_eq!(
             update_large(
                 &mut data,
                 &mut index,
@@ -523,7 +540,8 @@ mod tests {
                 &mut rng,
                 /*parallel*/ true
             )
-            .is_ok()
+            .unwrap() as f32,
+            0.0051520467
         );
 
         // Verify the resulting dataset.

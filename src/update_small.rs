@@ -1,5 +1,6 @@
 //! One boosting iteration's data update: accumulate the new tree's leaf values
-//! into the running predictions, then recompute the per-row gradient/hessian pairs.
+//! into the running predictions, then recompute the per-row gradient/hessian
+//! pairs, and report the mean training loss over all rows.
 //!
 //! Functions:
 //! - `update_small`: optional tree update plus gradient/hessian update, optionally
@@ -16,6 +17,9 @@ use rayon::prelude::*;
 /// rewritten with its position and the objective's gradient/hessian at
 /// (`target`, `predict`).
 ///
+/// Returns the mean loss over all rows, evaluated at the (possibly
+/// tree-adjusted) predictions.
+///
 /// `parallel` runs both updates over `BATCH_SIZE`-row chunks via rayon; rows
 /// within and across chunks are still processed independently, so results
 /// are identical to the sequential path.
@@ -25,8 +29,8 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
     data: &Dataset<T>,
     tree: Option<&Tree>,
     parallel: bool,
-) {
-    if parallel {
+) -> f64 {
+    let loss = if parallel {
         // Rows are partitioned into `BATCH_SIZE` chunks processed concurrently;
         // each chunk gets its base offset so global row positions stay correct.
         const BATCH_SIZE: usize = 1024;
@@ -37,19 +41,21 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
         index_chunks
             .zip(target_chunks.zip(predict_chunks))
             .enumerate()
-            .for_each(|(idx, (dst, (y, y_pred)))| {
+            .map(|(idx, (dst, (y, y_pred)))| {
                 let offset = idx * BATCH_SIZE;
                 if let Some(tree) = tree {
                     update_predict_slice(y_pred, tree, data.inputs(), offset);
                 }
-                update_index_slice::<I, O>(dst, y, y_pred, offset);
-            });
+                update_index_slice::<I, O>(dst, y, y_pred, offset)
+            })
+            .sum()
     } else {
         if let Some(tree) = tree {
             update_predict_slice(predict, tree, data.inputs(), 0);
         }
-        update_index_slice::<I, O>(index, data.target(), predict, 0);
-    }
+        update_index_slice::<I, O>(index, data.target(), predict, 0)
+    };
+    loss / (index.len() as f64)
 }
 
 /// Add the tree's leaf value to each row in `predict`.
@@ -69,6 +75,9 @@ fn update_predict_slice<T: Copy + Into<usize>>(
 /// Rewrite each row's [`RowIndex`] with its global position and the
 /// objective's first/second loss derivatives at (`target`, `predict`).
 ///
+/// Returns the sum of the objective's loss over the slice's rows (evaluated
+/// at the passed predictions), so callers can fold it into a dataset total.
+///
 /// `offset` is the dataset-wide index of the first row in this slice, so
 /// parallel chunks keep correct global row ids.
 fn update_index_slice<I: IndexT, O: Objective>(
@@ -76,14 +85,16 @@ fn update_index_slice<I: IndexT, O: Objective>(
     target: &[f32],
     predict: &[f32],
     offset: usize,
-) {
+) -> f64 {
     index
         .iter_mut()
         .zip(target.iter().zip(predict.iter()))
         .enumerate()
-        .for_each(|(idx, (dst, (y, y_pred)))| {
+        .map(|(idx, (dst, (y, y_pred)))| {
             *dst = RowIndex::new(offset + idx, O::derive(*y, *y_pred));
-        });
+            O::loss(*y, *y_pred) as f64
+        })
+        .sum()
 }
 
 #[cfg(test)]
@@ -100,7 +111,8 @@ mod tests {
         for parallel in [false, true] {
             let mut predict = vec![0.5; data.rows()];
             let mut index = RowIndex::<u32, SquaredLoss>::new_array(data.rows());
-            update_small(&mut predict, &mut index, &data, Some(&tree), parallel);
+            let loss = update_small(&mut predict, &mut index, &data, Some(&tree), parallel);
+            assert_eq!(loss as f32, 0.24499999);
 
             assert!(predict.iter().all(|x| *x == 0.7));
             index.iter().enumerate().for_each(|(k, v)| {

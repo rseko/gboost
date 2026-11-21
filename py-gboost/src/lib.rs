@@ -209,12 +209,16 @@ impl GradientBooster {
     ///
     /// Replaces any previously trained model; use `fit_next` to extend an
     /// existing one.
+    ///
+    /// Returns the mean training loss after the last round that added a
+    /// tree. Returns `float('nan')` when no round added a tree (e.g.
+    /// `iterations` is `0`).
     fn fit(
         &mut self,
         py: Python<'_>,
         x: PyReadonlyArray2<f32>,
         y: PyReadonlyArray1<f32>,
-    ) -> PyResult<()> {
+    ) -> PyResult<f64> {
         let flat = column_major(&x);
         let rows = x.as_array().shape()[0];
         let inputs: Vec<&[f32]> = flat.chunks_exact(rows).collect();
@@ -228,8 +232,8 @@ impl GradientBooster {
         let onehot: HashSet<usize> = self.onehot_columns.iter().copied().collect();
         let iterations = self.iterations;
 
-        let booster = py
-            .detach(|| -> Result<Box<dyn Booster<f32>>, PyErr> {
+        let (booster, loss) = py
+            .detach(|| -> Result<(Box<dyn Booster<f32>>, f64), PyErr> {
                 let result = if onehot.is_empty() {
                     new_booster(options, &inputs, &target)
                 } else {
@@ -241,19 +245,20 @@ impl GradientBooster {
                     new_with_features(options, &inputs, &target, features)
                 };
                 let mut b = result.map_err(boost_error_to_py)?;
-                b.fit(iterations).map_err(boost_error_to_py)?;
-                Ok(b)
+                let loss = b.fit(iterations).map_err(boost_error_to_py)?;
+                Ok((b, loss))
             })?;
 
         self.booster = Some(booster);
-        Ok(())
+        Ok(loss)
     }
 
     /// Grow one additional boosting round on the trained model.
     ///
-    /// Returns `false` when the round produced no tree (no gain); use it to
-    /// decide when to stop boosting.
-    fn fit_next(&mut self, py: Python<'_>) -> PyResult<bool> {
+    /// Returns the mean training loss after this round, or `None` when the
+    /// round produced no tree (no gain); use the `None` result to decide
+    /// when to stop boosting.
+    fn fit_next(&mut self, py: Python<'_>) -> PyResult<Option<f64>> {
         let booster = self
             .booster
             .as_mut()
@@ -284,16 +289,6 @@ impl GradientBooster {
         let scores = py
             .detach(|| booster.predict(&inputs).map_err(boost_error_to_py))?;
         Ok(scores.into_pyarray(py).into_any())
-    }
-
-    /// Mean loss of the current predictions against the training labels.
-    ///
-    /// Returns `None` when the model has not been trained.
-    fn loss(&self) -> Option<f32> {
-        self.booster
-            .as_ref()
-            .map(|b| b.loss())
-            .map(|a| a.iter().sum::<f32>() / a.len() as f32)
     }
 }
 

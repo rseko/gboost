@@ -24,11 +24,11 @@ def test_regression():
     y = rng.standard_normal(n).astype(np.float32)
 
     gb = GradientBooster(objective="squaredloss", iterations=10)
-    gb.fit(x, y)
+    loss = gb.fit(x, y)
     pred = gb.predict(x)
 
     assert np.allclose(pred[:3], [-0.82953626, 1.4252262, -1.0186437])
-    assert np.isclose(gb.loss(), 0.02905933)
+    assert np.isclose(loss, 0.02905933)
 
 
 def test_classification():
@@ -37,11 +37,11 @@ def test_classification():
     y = rng.integers(0, 2, n).astype(np.float32)
 
     gb = GradientBooster(objective="logloss", iterations=10)
-    gb.fit(x, y)
+    loss = gb.fit(x, y)
     pred = gb.predict(x)
 
     assert np.allclose(pred[:3], [1.8529657, 1.6342188, 2.718839])
-    assert np.isclose(gb.loss(), 0.24753502)
+    assert np.isclose(loss, 0.24753502)
 
 
 def test_fit_next():
@@ -52,12 +52,11 @@ def test_fit_next():
     gb = GradientBooster(objective="squaredloss", iterations=0)
     gb.fit(x, y)
 
-    prev = gb.loss()
+    prev = float("inf")
     for _ in range(10):
-        assert gb.fit_next() is True
-        cur = gb.loss()
-        assert cur < prev
-        prev = cur
+        loss = gb.fit_next()
+        assert loss < prev
+        prev = loss
 
 
 def test_fit_failures():
@@ -97,8 +96,7 @@ def test_untrained_guards():
     x = np.zeros((100, 5), dtype=np.float32)
     gb = GradientBooster()
 
-    # Before fit: loss is None, predict/fit_next raise.
-    assert gb.loss() is None
+    # Before fit: predict/fit_next raise.
     with pytest.raises(ValueError, match="not trained"):
         gb.predict(x)
     with pytest.raises(ValueError, match="not trained"):

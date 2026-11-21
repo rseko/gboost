@@ -26,13 +26,19 @@ use crate::quantize::QuantFloat;
 /// be shared across threads.
 pub trait Booster<F: QuantFloat>: Send + Sync {
     /// Grow up to `max_rounds` boosting rounds in a single call.
-    fn fit(&mut self, max_rounds: usize) -> BoostResult<()>;
+    ///
+    /// Returns the mean training loss after the last round that added a
+    /// tree. Stops early (returning the loss of the last successful round)
+    /// when a round produces no tree. Returns `NAN` when no round added a
+    /// tree (e.g. `max_rounds` is `0`).
+    fn fit(&mut self, max_rounds: usize) -> BoostResult<f64>;
 
     /// Grow one boosting round and fold the new tree into the model.
     ///
-    /// Returns `Ok(false)` when the round produced no tree (no gain), which
-    /// callers may use to decide when to stop boosting.
-    fn fit_next(&mut self) -> BoostResult<bool>;
+    /// Returns `Ok(Some(loss))` where `loss` is the mean training loss after
+    /// this round. Returns `Ok(None)` when the round produced no tree (no
+    /// gain), which callers may use to decide when to stop boosting.
+    fn fit_next(&mut self) -> BoostResult<Option<f64>>;
 
     /// Score a batch of raw (unquantized) feature columns.
     ///
@@ -40,12 +46,6 @@ pub trait Booster<F: QuantFloat>: Send + Sync {
     /// must have the same length. Each row's prediction is the configured
     /// base score plus the sum of the leaf values the row lands in.
     fn predict(&self, inputs: &[&[F]]) -> BoostResult<Vec<f32>>;
-
-    /// Per-row loss of the current predictions against the true labels.
-    ///
-    /// Returns one value per row, in row order, each computed by the
-    /// configured objective's `loss(y, y_pred)`.
-    fn loss(&self) -> Vec<f32>;
 }
 
 /// Build a boxed, object-safe booster over in-memory training columns.
@@ -88,25 +88,23 @@ pub fn new_with_features<F: QuantFloat>(
 /// methods; `F` is unconstrained at this layer beyond what the trait
 /// already demands.
 impl<F: QuantFloat, T: BinT, I: IndexT, O: Objective> Booster<F> for BoostModel<T, I, O> {
-    fn fit(&mut self, max_rounds: usize) -> BoostResult<()> {
+    fn fit(&mut self, max_rounds: usize) -> BoostResult<f64> {
+        let mut loss = f64::NAN;
         for _ in 0..max_rounds {
-            if !self.fit_next()? {
-                break;
-            }
+            loss = match self.fit_next()? {
+                Some(x) => x,
+                None => break,
+            };
         }
-        Ok(())
+        Ok(loss)
     }
 
-    fn fit_next(&mut self) -> BoostResult<bool> {
+    fn fit_next(&mut self) -> BoostResult<Option<f64>> {
         BoostModel::<T, I, O>::fit_next(self)
     }
 
     fn predict(&self, inputs: &[&[F]]) -> BoostResult<Vec<f32>> {
         BoostModel::<T, I, O>::predict(self, inputs)
-    }
-
-    fn loss(&self) -> Vec<f32> {
-        BoostModel::<T, I, O>::loss(self)
     }
 }
 
@@ -210,7 +208,7 @@ mod tests {
             &target,
         )
         .unwrap();
-        assert_eq!(booster.fit_next().ok(), Some(true));
+        assert_eq!(booster.fit_next().unwrap().unwrap() as f32, 0.10154915);
 
         let preds = booster.predict(&inputs).unwrap();
         assert_eq!(preds.len(), NUM_ROWS);
@@ -227,7 +225,7 @@ mod tests {
             &target,
         )
         .unwrap();
-        assert_eq!(booster.fit_next().ok(), Some(true));
+        assert_eq!(booster.fit_next().unwrap().unwrap() as f32, 0.67944324);
 
         let preds = booster.predict(&inputs).unwrap();
         assert_eq!(preds.len(), NUM_ROWS);
@@ -240,7 +238,7 @@ mod tests {
 
         let mut booster =
             new_booster::<f32>(Options::default().set_max_bins(65535), &inputs, &target).unwrap();
-        assert_eq!(booster.fit_next().ok(), Some(true));
+        assert_eq!(booster.fit_next().unwrap().unwrap() as f32, 0.10110009);
 
         let preds = booster.predict(&inputs).unwrap();
         assert_eq!(preds.len(), NUM_ROWS);
@@ -256,7 +254,7 @@ mod tests {
             .collect();
         let mut booster =
             new_with_features::<f32>(Options::default(), &inputs, &target, features).unwrap();
-        assert_eq!(booster.fit_next().ok(), Some(true));
+        assert_eq!(booster.fit_next().unwrap().unwrap() as f32, 0.10154915);
 
         let preds = booster.predict(&inputs).unwrap();
         assert_eq!(preds.len(), NUM_ROWS);
@@ -294,7 +292,7 @@ mod tests {
             &target,
         )
         .unwrap();
-        booster.fit(50).unwrap();
+        assert_eq!(booster.fit(50).unwrap() as f32, 0.008986463);
 
         let preds = booster.predict(&inputs).unwrap();
         let errs = target
@@ -304,7 +302,6 @@ mod tests {
             .collect::<Vec<_>>();
         let mean = |a: Vec<f32>| a.iter().sum::<f32>() / a.len() as f32;
         assert_eq!(mean(errs), 0.10598089);
-        assert_eq!(mean(booster.loss()), 0.008986455);
     }
 
     #[test]

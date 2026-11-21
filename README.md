@@ -137,28 +137,30 @@ let options = Options::default()
 
 let mut booster = new_booster::<f32>(options, &cols, &target)?;
 
-// Grow up to 50 rounds; stops early if a round adds no tree.
-booster.fit(50)?;
+// Grow up to 50 rounds; stops early if a round adds no tree. The returned
+// value is the mean training loss after the last round that added a tree.
+let train_loss = booster.fit(50)?;
 
 let predictions = booster.predict(&cols)?;
-let per_row_loss = booster.loss();
 ```
 
 ### Growing round by round
 
 `fit` is a convenience wrapper over `fit_next`. Each call to `fit_next`
-grows one tree and folds it into the ensemble. To control the stopping
-condition yourself, loop until it reports no gain:
+grows one tree, folds it into the ensemble, and returns the mean training
+loss after that round. To control the stopping condition yourself, loop
+until it reports no gain:
 
 ```rust
 use gboost::boost_api::Booster;
 
-while booster.fit_next()? {
+// `None` ends the loop; `Some(loss)` is the mean training loss of the round.
+while booster.fit_next()?.is_some() {
     // keep boosting
 }
 ```
 
-`fit_next` returns `Ok(false)` when a round produced no tree (no gain), which
+`fit_next` returns `Ok(None)` when a round produced no tree (no gain), which
 is the natural early-stopping signal.
 
 ### Explicit feature descriptors

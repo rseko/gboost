@@ -73,20 +73,6 @@ pub struct BoostModel<T, I, O> {
 }
 
 impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
-    /// Per-row loss of the stored predictions against the true labels.
-    ///
-    /// Returns one value per row, in row order, each computed by the
-    /// configured objective's `loss(y, y_pred)` on the row's label and
-    /// the row's current prediction.
-    pub fn loss(&self) -> Vec<f32> {
-        self.data
-            .target()
-            .iter()
-            .zip(&self.predict)
-            .map(|(y, y_pred)| O::loss(*y, *y_pred))
-            .collect()
-    }
-
     /// Predict over a batch of raw (unquantized) feature columns.
     ///
     /// `inputs` holds one column per feature, in feature order; every
@@ -151,10 +137,11 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
     /// The tree is grown on a freshly seeded RNG (the global seed plus the
     /// current tree count, so each round is reproducible independently of
     /// how many rounds preceded it). A tree whose root is a leaf contributes
-    /// nothing, so the round is skipped and `false` is returned; otherwise
+    /// nothing, so the round is skipped and `None` is returned; otherwise
     /// the tree is applied to the data, appended to the model file (when a
-    /// persistence path is set), and `true` is returned.
-    pub fn fit_next(&mut self) -> BoostResult<bool> {
+    /// persistence path is set), and `Some(loss)` is returned, where
+    /// `loss` is the mean training loss after this round.
+    pub fn fit_next(&mut self) -> BoostResult<Option<f64>> {
         // Per-round RNG: global seed + round index, so each round is
         // independently reproducible.
         let parallel = self.options.boost_options.parallel;
@@ -172,13 +159,13 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
         );
         let tree = builder.execute();
         if let NodeKind::Leaf(_) = tree.get(0).kind {
-            return Ok(false);
+            return Ok(None);
         }
 
         // Apply the tree: offload path streams over disk, small path folds
         // in-memory.
         let persist_path = self.options.boost_options.persist_path.as_ref();
-        if let Some(config) = &mut self.offload {
+        let loss = if let Some(config) = &mut self.offload {
             config.train_step += 1;
             rng = StdRng::seed_from_u64(seed + 1);
 
@@ -190,7 +177,7 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
                 config,
                 &mut rng,
                 parallel,
-            )?;
+            )?
         } else {
             update_small(
                 &mut self.predict,
@@ -198,8 +185,8 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
                 &self.data,
                 Some(&tree),
                 parallel,
-            );
-        }
+            )
+        };
 
         // Append the tree to the model file (one tree per round).
         if let Some(path) = persist_path {
@@ -218,7 +205,7 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
 
         // Record the tree and signal a successful round.
         self.trees.push(tree);
-        Ok(true)
+        Ok(Some(loss))
     }
 
     /// Build a booster over in-memory training columns (the small-dataset
@@ -673,7 +660,7 @@ mod tests {
         let mut model =
             BoostModel::<u8, u32, SquaredLoss>::init_small(options, &[&[1.0]], &[1.0], None)
                 .unwrap();
-        assert_eq!(model.fit_next().ok(), Some(false));
+        assert_eq!(model.fit_next().unwrap(), None);
     }
 
     #[test]
@@ -690,15 +677,13 @@ mod tests {
                 BoostModel::<u8, u32, SquaredLoss>::init_small(options, &inputs, &target, None)
                     .unwrap();
             for _ in 0..10 {
-                assert_eq!(model.fit_next().ok(), Some(true));
+                assert!(model.fit_next().unwrap().is_some());
             }
 
             let predict = model.predict(&inputs).unwrap();
             for (i, (y1, y2)) in predict.iter().zip(&model.predict).enumerate() {
                 assert!((y1 - y2).abs() < 1e-6, "{i}: {y1} != {y2}");
             }
-            let mean = |a: Vec<f32>| a.iter().sum::<f32>() / a.len() as f32;
-            assert_eq!(mean(model.loss()), 0.035231672);
         }
     }
 

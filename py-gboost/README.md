@@ -40,29 +40,28 @@ y = rng.standard_normal(100).astype(np.float32)        # one value per row
 
 # Regression
 gb = GradientBooster(objective="squaredloss", iterations=100)
-gb.fit(x, y)
+loss = gb.fit(x, y)         # mean training loss after the last round that added a tree
 scores = gb.predict(x)      # np.ndarray of float32, one score per row
-gb.loss()                   # mean loss of the current predictions vs. the labels
 
 # Binary classification (labels in {0, 1})
 y = rng.integers(0, 2, 100).astype(np.float32)
 gb = GradientBooster(objective="logloss", iterations=100)
-gb.fit(x, y)
+loss = gb.fit(x, y)
 ```
 
 ### Growing round by round
 
 `fit(x, y)` trains up to `iterations` rounds and replaces any previously
 trained model. `fit_next()` grows one additional round on the existing model
-and returns `False` when a round produced no tree (no gain) — the natural
-early-stopping signal.
+and returns the mean training loss after that round, or `None` when a round
+produced no tree (no gain) — the natural early-stopping signal.
 
 ```python
 gb = GradientBooster(objective="squaredloss", iterations=0)
 gb.fit(x, y)                # fit(0) builds the booster without growing trees
 
-while gb.fit_next():
-    print(gb.loss())
+while (loss := gb.fit_next()) is not None:
+    print(loss)
 ```
 
 ## `GradientBooster`
@@ -76,6 +75,7 @@ valid, fully-configured instance.
 | `objective`          | `"squaredloss"` | Loss to minimize: `"squaredloss"` (regression) or `"logloss"` (classification). |
 | `base_score`         |     `0.0`     | Initial constant prediction before any tree is added.                            |
 | `max_bins`           |     `255`     | Maximum number of quantization bins per column.                                  |
+| `bins_oversample`    |    `100`      | Multiplier on `max_bins` for candidate cut points before merging (sort-based path only). Higher = better-balanced bins. |
 | `persist_path`       |   `None`      | Directory for on-disk artifacts, if persistence is used.                         |
 | `parallel`           |   `True`      | Enable the parallel (Rayon) execution paths.                                     |
 | `seed`               |      `0`      | Seed for reproducible random draws (subsampling).                                |
@@ -96,16 +96,17 @@ valid, fully-configured instance.
 
 ### Methods
 
-- **`fit(x, y) -> None`** — Train the booster. `x` is a 2-D `float32` matrix
+- **`fit(x, y) -> float`** — Train the booster. `x` is a 2-D `float32` matrix
   of shape `(rows, cols)`; `y` is a 1-D `float32` target of length `rows`.
-  Replaces any previously trained model.
-- **`fit_next() -> bool`** — Grow one additional round on the trained model.
-  Returns `False` when the round produced no tree (no gain).
+  Replaces any previously trained model. Returns the mean training loss after
+  the last round that added a tree, or `float('nan')` when no round added a
+  tree (e.g. `iterations=0`).
+- **`fit_next() -> float | None`** — Grow one additional round on the trained
+  model. Returns the mean training loss after that round, or `None` when the
+  round produced no tree (no gain).
 - **`predict(x) -> np.ndarray`** — Score `x` (shape `(rows, cols)`, same
   column count as training) with the trained model; returns one `float32`
   score per row.
-- **`loss() -> float | None`** — Mean loss of the current predictions against
-  the training labels, or `None` before `fit`.
 - **`get_params() -> dict`** — Return the constructor kwargs as a dict of
   `name -> value`; `GradientBooster(**gb.get_params())` reconstructs an
   equivalent instance.
