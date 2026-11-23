@@ -12,6 +12,7 @@
 
 use crate::dataset::{Dataset, IndexT, Objective, RowIndex};
 use crate::tree::Tree;
+use log::trace;
 use rand::{RngExt, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use rayon::prelude::*;
 use std::fs::{File, OpenOptions};
@@ -74,6 +75,15 @@ where
     I: IndexT,
     O: Objective,
 {
+    trace!(
+        "update_large: rows={}/{} bits={}/{} tree={}",
+        index.len(),
+        config.total_rows,
+        config.bits_per_batch,
+        BATCH,
+        tree.is_some()
+    );
+
     // The sampled rows per batch must scale with the dataset size, so the
     // in-memory `data(inputs)` view and the on-disk layout stay consistent.
     assert_eq!(config.bits_per_batch.clamp(1, BATCH), config.bits_per_batch);

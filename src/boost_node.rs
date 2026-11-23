@@ -15,6 +15,7 @@
 use crate::dataset::{Dataset, Feature, FeatureKind, IndexT, Objective, RowIndex};
 use crate::histogram::Histogram;
 use itertools::{Itertools, partition};
+use log::trace;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -233,6 +234,7 @@ pub(crate) fn find_all_splits<I: IndexT, O: Objective>(
                 None => tasks.extend(item.histogram.iter().map(|col| (idx, col))),
             }
         }
+        trace!("find splits: {} tasks ({})", tasks.len(), splittables.len());
 
         // Score each pair independently (no shared state), keeping only
         // splittables that found at least one candidate.
@@ -264,6 +266,7 @@ pub(crate) fn find_all_splits<I: IndexT, O: Objective>(
                     .max_by(select)
             }
         };
+        trace!("find splits: simple ({})", splittables.len());
         splittables.into_iter().map(find_best_split).collect()
     }
 }
@@ -296,6 +299,7 @@ impl<'a, I: IndexT, O: Objective> Splittable<'a, I, O> {
             }
         };
         let (index_left, index_right) = self.index.split_at_mut(pos);
+        trace!("partition: {} + {}", index_left.len(), index_right.len());
 
         // On a non-final split, keep the larger side's existing histogram and
         // rebuild the smaller side from scratch, subtracting it to recover

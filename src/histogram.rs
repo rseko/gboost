@@ -7,6 +7,7 @@
 //!   (grad, hess) pairs, plus the `build` entry point.
 
 use crate::dataset::{Dataset, Feature, IndexT, Objective, RowIndex};
+use log::trace;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::ops::{AddAssign, SubAssign};
@@ -67,12 +68,20 @@ impl Histogram {
         assert!(data.rows() >= index.len());
 
         let mut result = Self::new(data.features(), columns);
+        let columns = columns.map_or(data.columns(), |c| c.len());
+        trace!(
+            "histogram build: bins={} rows={} columns={}/{}",
+            result.data.len(),
+            index.len(),
+            columns,
+            result.splits.len() - 1
+        );
+
         if parallel && !result.data.is_empty() {
             const BATCH_SIZE: usize = 1024;
-            let columns = columns.map_or(data.columns(), |c| c.len());
+            let threads = rayon::current_num_threads();
             let batches = index.len().div_ceil(BATCH_SIZE);
             let bins = result.data.len();
-            let threads = rayon::current_num_threads();
 
             // Choose a split-K factor: partition rows into `split` independent
             // histograms built in parallel (see the `buffer` below) and merged
@@ -92,6 +101,10 @@ impl Histogram {
                     cost_1 as isize - (cost_2 + bins * split) as isize
                 })
                 .unwrap();
+            trace!(
+                "parallel: split={} threads={} batches={}",
+                split, batches, threads
+            );
 
             if split > 1 {
                 // Many row chunks: each fold runs in parallel into a private
@@ -160,8 +173,8 @@ impl Histogram {
     }
 
     /// Mutable histogram data (internal).
-    #[allow(unused)]
-    pub(crate) fn data_mut(&mut self) -> &mut [Item] {
+    #[cfg(test)]
+    pub fn data_mut(&mut self) -> &mut [Item] {
         &mut self.data
     }
 }

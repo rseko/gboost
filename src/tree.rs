@@ -240,8 +240,8 @@ impl std::fmt::Display for Tree {
 }
 
 /// Build a balanced tree (used in tests).
-#[allow(unused)]
-pub(crate) fn create_test_tree(depth: u32) -> Tree {
+#[cfg(test)]
+pub fn create_test_tree(depth: u32) -> Tree {
     let mut nodes = vec![];
     let leaves = (1 << depth) / 2;
     for idx in 1..leaves {

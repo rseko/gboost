@@ -20,6 +20,7 @@ use crate::update_large::{
 use crate::update_small::update_small;
 
 use itertools::Itertools;
+use log::{debug, trace};
 use num_traits::{Float, PrimInt};
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
@@ -128,6 +129,8 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
                 *dst = base_score + predict(idx);
             }
         }
+
+        trace!("predict: rows={} trees={}", rows, self.trees.len());
         Ok(result)
     }
 
@@ -145,7 +148,8 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
         // Per-round RNG: global seed + round index, so each round is
         // independently reproducible.
         let parallel = self.options.boost_options.parallel;
-        let seed = self.options.boost_options.seed + self.trees.len() as u64;
+        let round = self.trees.len();
+        let seed = self.options.boost_options.seed + round as u64;
         let mut rng = StdRng::seed_from_u64(seed);
 
         // Grow the tree and bail early if the root is a leaf (no gain).
@@ -159,6 +163,7 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
         );
         let tree = builder.execute();
         if let NodeKind::Leaf(_) = tree.get(0).kind {
+            debug!("round {}: no split found", round);
             return Ok(None);
         }
 
@@ -205,6 +210,7 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
 
         // Record the tree and signal a successful round.
         self.trees.push(tree);
+        debug!("round {}: loss={}", round, loss);
         Ok(Some(loss))
     }
 
@@ -227,6 +233,8 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
         target: &[f32],
         features: Option<Vec<Feature>>,
     ) -> BoostResult<Self> {
+        debug!("booster: rows={} columns={}", target.len(), inputs.len());
+
         let persist_path = options.boost_options.persist_path.as_ref();
         let parallel = options.boost_options.parallel;
 
@@ -246,6 +254,7 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
         let (features, rows, trees) = if let Some(path) = persist_path
             && path.join(FILENAME_MODEL).exists()
         {
+            debug!("restoring saved model from {}", path.display());
             let content = std::fs::read_to_string(path.join(FILENAME_MODEL))?;
             let (features, trees) =
                 parse_model(&content).map_err(|err| BoostError::Parser(format!("{err:#}")))?;
@@ -287,6 +296,7 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
             // Start the model file with the feature header block so later
             // `fit_next` rounds can append their trees.
             if let Some(path) = persist_path {
+                debug!("saving model features to {}", path.display());
                 let mut model_file = File::create(path.join(FILENAME_MODEL))?;
                 for feat in features.iter() {
                     model_file.write_all(format_feature(feat).as_bytes())?;
@@ -309,6 +319,7 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
         for tree in &trees {
             update_small(&mut predict, &mut index, &data, Some(tree), parallel);
         }
+        trace!("booster ready: trees={}", trees.len());
 
         Ok(Self {
             options,
@@ -335,6 +346,7 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
             Some(p) => p,
             None => return BoostResult::Err(BoostError::MissingPath),
         };
+        debug!("booster (out-of-core): path={}", path.display());
 
         // Parse the feature headers and all previously saved trees.
         let content = std::fs::read_to_string(path.join(FILENAME_MODEL))?;
@@ -382,6 +394,12 @@ impl<T: BinT, I: IndexT, O: Objective> BoostModel<T, I, O> {
         )?;
 
         // No in-memory `predict` on this path - predictions stay on disk.
+        trace!(
+            "booster ready: rows={}/{} trees={}",
+            sample_rows,
+            rows,
+            trees.len()
+        );
         Ok(Self {
             options,
             data,
@@ -417,6 +435,12 @@ impl ModelInit {
     /// Start staging a dataset under `path`, truncating any existing model
     /// file. `max_bins` caps the per-column bin count (`>= 1`).
     pub fn new(path: PathBuf, max_bins: u16, oversample: Option<u16>) -> Result<Self> {
+        debug!(
+            "staging dataset: path={} max_bins={}",
+            path.display(),
+            max_bins
+        );
+
         let model_file = File::create(path.join(FILENAME_MODEL))?;
         Ok(Self {
             path,
@@ -466,6 +490,7 @@ impl ModelInit {
 
         // Store the feature and return the thresholds.
         self.features.push(feature);
+        debug!("staged feature column: {} bins={}", name, bins_quant.len());
         Ok(bins_quant)
     }
 
@@ -474,6 +499,7 @@ impl ModelInit {
         let mut target_file = File::create(self.path.join(FILENAME_TARGET))?;
         target_file.write_all(data.as_bytes())?;
         self.model_file.write_all(b"\n")?;
+        debug!("staged target: rows={}", data.len());
         Ok(())
     }
 

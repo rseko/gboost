@@ -15,6 +15,7 @@ large-index = []
 [dependencies]
 anyhow = "1.0"
 itertools = "0.15"
+log = "0.4"
 num-traits = "0.2"
 rand = "0.10"
 rayon = "1.12"
@@ -27,6 +28,7 @@ zerocopy = { version = "0.8", features = ["std"] }
 criterion = "0.8"
 half = { version = "2.7", features = ["num-traits"] }
 tempfile = "3"
+test-log = "0.2"
 
 [[bench]]
 name = "benchmark"

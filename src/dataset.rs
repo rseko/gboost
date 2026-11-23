@@ -293,8 +293,8 @@ fn sigmoid_normal(y: f32) -> f32 {
 }
 
 /// Build an empty dataset (used in tests).
-#[allow(unused)]
-pub(crate) fn create_test_dataset(columns: usize, rows: usize, bins: usize) -> Dataset<u16> {
+#[cfg(test)]
+pub fn create_test_dataset(columns: usize, rows: usize, bins: usize) -> Dataset<u16> {
     let bins = Vec::from_iter((0..bins).map(|i| i as f32));
     Dataset::<u16>::new(
         vec![Feature::linear("", Some(bins)); columns],

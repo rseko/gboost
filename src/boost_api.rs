@@ -281,7 +281,7 @@ mod tests {
         assert!(res2.is_err());
     }
 
-    #[test]
+    #[test_log::test]
     fn fit_then_predict() {
         let (data, target) = build_data();
         let inputs = data.iter().map(|x| x.as_slice()).collect::<Vec<_>>();

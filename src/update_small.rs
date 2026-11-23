@@ -8,6 +8,7 @@
 
 use crate::dataset::{Dataset, IndexT, Objective, RowIndex};
 use crate::tree::Tree;
+use log::trace;
 use rayon::prelude::*;
 
 /// Update a dataset for one boosting round.
@@ -30,6 +31,8 @@ pub fn update_small<T: Copy + Into<usize> + Sync, I: IndexT, O: Objective>(
     tree: Option<&Tree>,
     parallel: bool,
 ) -> f64 {
+    trace!("update_small: rows={} tree={}", index.len(), tree.is_some());
+
     let loss = if parallel {
         // Rows are partitioned into `BATCH_SIZE` chunks processed concurrently;
         // each chunk gets its base offset so global row positions stay correct.

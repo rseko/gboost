@@ -14,6 +14,7 @@ use crate::boost_node::{
 use crate::dataset::{Dataset, FeatureKind, IndexT, Objective, RowIndex};
 use crate::histogram::Histogram;
 use crate::tree::{Node, NodeKind, NodeSplit, Tree};
+use log::{debug, trace};
 use rand::{rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
@@ -128,6 +129,12 @@ where
         }
 
         // The root's histogram over the sampled rows and features.
+        debug!(
+            "starting tree build: rows={} columns={} initial={}",
+            index.len(),
+            columns.len(),
+            !subsample
+        );
         let columns_set = HashSet::from_iter(columns);
         let histogram = Histogram::build(dataset, Some(&columns_set), index, !subsample, parallel);
 
@@ -139,6 +146,7 @@ where
             .fold((0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1));
         let (l1, l2) = (node_options.reg_alpha, node_options.reg_lambda);
         let gain = calc_gain(gradient, hessian, l1, l2);
+        trace!("initial gain: {}", gain);
 
         // Create the builder instance.
         let mut builder = Self {
@@ -195,7 +203,9 @@ where
         for idx in 0..self.next_index {
             nodes.push(self.result_nodes.remove(&idx).unwrap());
         }
-        Tree::new(nodes).unwrap()
+        let tree = Tree::new(nodes).unwrap();
+        trace!("tree built: nodes={}", self.next_index);
+        tree
     }
 
     /// Process one batch of queued nodes: find their best splits, record
@@ -214,6 +224,7 @@ where
         let depth_limit = self.tree_options.max_depth.overflowing_sub(1).0;
         let (can_split, cannot_split) = self.partition_batch(batch, depth_limit);
         self.split_budget -= can_split.len();
+        trace!("next batch: {} + {}", can_split.len(), cannot_split.len());
 
         // Record one split node per node that is being split. Each node's
         // two children receive the next two free indices, so `base_id` is
@@ -334,6 +345,10 @@ where
             .into_iter()
             .flat_map(|(item, split)| {
                 let final_split = self.split_budget == 0 || item.depth == depth_limit;
+                trace!(
+                    "split: feature={} bin={} missing={} final={}",
+                    split.feature_id, split.bin_id, split.with_missing, final_split
+                );
                 let (left, right) =
                     item.value
                         .split(split, self.dataset, final_split, self.parallel);
@@ -356,6 +371,7 @@ where
                 let sample_size =
                     get_sample_size(columns.len(), self.tree_options.colsample_bylevel);
                 columns = columns.partial_shuffle(self.rng, sample_size).0.to_vec();
+                debug!("columns at level {}: {:?}", item.depth, columns);
                 self.columns_bylevel.push(columns);
             }
             item.value.columns = Some(self.columns_bylevel[item.depth].clone());

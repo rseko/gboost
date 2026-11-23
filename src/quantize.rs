@@ -14,6 +14,7 @@
 //! - `bin_all` fits every column's bin boundaries.
 //! - `QuantFloat` is the bound every public float in this module shares.
 
+use log::trace;
 use num_traits::{Float, PrimInt};
 use rayon::prelude::*;
 use std::collections::{BinaryHeap, VecDeque};
@@ -40,6 +41,8 @@ pub fn quantize_all<F: Float + Sync, I: PrimInt + Send>(
     data_with_bins: &[(&[F], &[F])],
     parallel: bool,
 ) -> Vec<Vec<I>> {
+    trace!("quantize_all: columns={}", data_with_bins.len());
+
     let quantize = |(data, bins): &(&[F], &[F])| -> Vec<I> {
         data.iter().map(|x| quantize(x, bins)).collect()
     };
@@ -62,6 +65,8 @@ pub fn bin_all<F: QuantFloat>(
     oversample: usize,
     parallel: bool,
 ) -> Vec<Vec<F>> {
+    trace!("bin_all: columns={} max_bins={}", data.len(), max_bins);
+
     let bin = |data: &&[F]| bins_from(data, max_bins, oversample);
     if parallel {
         data.par_iter().map(bin).collect()
@@ -81,8 +86,10 @@ pub fn bins_from<F: QuantFloat>(data: &[F], max_bins: usize, oversample: usize) 
 
     let n_bytes = std::mem::size_of::<F>();
     let mut bins = if n_bytes == 2 && data.len() > max_bins {
+        trace!("using histogram binning");
         fit_small::<_, u16>(data, max_bins)
     } else {
+        trace!("using sort binning (sample={})", oversample);
         fit_large(data, max_bins, oversample.max(1))
     };
 
@@ -124,6 +131,7 @@ where
             hist[bin] += 1;
         }
     }
+    trace!("histogram: {} unique values", unique);
 
     // Map a histogram slot back to its value.
     let convert = |bin: usize| from_bits::<F, I>(I::from(bin + nan_size).unwrap());
@@ -190,6 +198,7 @@ fn fit_large<F: QuantFloat>(data: &[F], max_bins: usize, oversample: usize) -> V
 
     let start = data.partition_point(|x| x.is_nan());
     let slice = &data[start..];
+    trace!("sort: {} total values", slice.len());
     if slice.is_empty() {
         return vec![];
     }
@@ -207,6 +216,7 @@ fn fit_large<F: QuantFloat>(data: &[F], max_bins: usize, oversample: usize) -> V
     if bins.len() <= max_bins {
         // Distinct values fit: `take` simply stopped after the last
         // one, so `bins` is the full distinct set.
+        trace!("sort: {} unique values", bins.len());
         return bins;
     }
 
@@ -221,6 +231,7 @@ fn fit_large<F: QuantFloat>(data: &[F], max_bins: usize, oversample: usize) -> V
         }
     }
     if cuts.len() <= max_bins {
+        trace!("sort: {} sampled values", cuts.len());
         return cuts.into_iter().map(|p| slice[p - 1]).collect();
     }
 
@@ -262,6 +273,8 @@ fn fit_large<F: QuantFloat>(data: &[F], max_bins: usize, oversample: usize) -> V
 /// stale heap entries, which the loop validates against the live groups
 /// before applying.
 fn merge_adjacent(sizes: &[usize], target: usize) -> Vec<usize> {
+    trace!("merging {} groups to {}", sizes.len(), target);
+
     let mut count = sizes.len() - 1;
     let mut groups = sizes
         .iter()
@@ -360,9 +373,11 @@ fn refine_bounds(sizes: &[usize], ranges: &mut [usize]) -> Vec<usize> {
     let n = ranges.len() - 1;
     let mut queue = VecDeque::from_iter(1..n);
     let mut dirty = vec![true; n - 1];
+    let mut iter_count = 0;
 
     while let Some(i) = queue.pop_front() {
         dirty[i - 1] = false;
+        iter_count += 1;
 
         // Boundary `b` splits the span between neighbours `a` and `c`;
         // relax it to the position that minimizes the left/right imbalance.
@@ -399,6 +414,7 @@ fn refine_bounds(sizes: &[usize], ranges: &mut [usize]) -> Vec<usize> {
             }
         }
     }
+    trace!("refinement iterations: {}", iter_count);
 
     // Map each window to its group's total size.
     ranges
